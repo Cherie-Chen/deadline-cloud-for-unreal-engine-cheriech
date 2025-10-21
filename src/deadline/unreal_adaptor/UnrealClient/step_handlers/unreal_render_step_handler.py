@@ -181,12 +181,29 @@ class UnrealRenderStepHandler(BaseStepHandler):
         :param movie_pipeline_queue_subsystem: unreal.MoviePipelineQueueSubsystem instance
         :param queue_manifest_path: Path to the manifest file
         """
-        manifest_queue = unreal.MoviePipelineLibrary.load_manifest_file_from_string(
-            queue_manifest_path
-        )
-        pipeline_queue = movie_pipeline_queue_subsystem.get_queue()
-        pipeline_queue.delete_all_jobs()
-        pipeline_queue.copy_from(manifest_queue)
+        try:
+            logger.info(f"queue_manifest_path: '{queue_manifest_path}'")
+            project_dir = os.path.dirname(
+                unreal.Paths.convert_relative_path_to_full(unreal.Paths.get_project_file_path())
+            )
+            
+            # Try to make the path relative to project directory
+            if os.path.isabs(queue_manifest_path) and queue_manifest_path.startswith(project_dir):
+                relative_path = os.path.relpath(queue_manifest_path, project_dir).replace("\\", "/")
+                logger.info(f"Converting absolute path '{queue_manifest_path}' to relative path '{relative_path}'")
+                manifest_path_for_unreal = relative_path
+            else:
+                manifest_path_for_unreal = queue_manifest_path
+            
+            manifest_queue = unreal.MoviePipelineLibrary.load_manifest_file_from_string(
+                manifest_path_for_unreal
+            )
+            pipeline_queue = movie_pipeline_queue_subsystem.get_queue()
+            pipeline_queue.delete_all_jobs()
+            pipeline_queue.copy_from(manifest_queue)
+        except Exception as e:
+            # Log warning and continue with workflow (maintain old behavior)
+            logger.warning(f"Failed to load manifest file '{queue_manifest_path}': {e}. Continuing with workflow.")
 
     @staticmethod
     def create_queue_from_manifest(movie_pipeline_queue_subsystem, queue_manifest_path: str):

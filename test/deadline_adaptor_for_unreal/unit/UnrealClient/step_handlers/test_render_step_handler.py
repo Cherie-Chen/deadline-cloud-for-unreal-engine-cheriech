@@ -2,7 +2,9 @@
 
 import sys
 import pytest
-from unittest.mock import MagicMock, patch
+import tempfile
+import os
+from unittest.mock import MagicMock, patch, mock_open
 
 
 unreal_mock = MagicMock()
@@ -94,3 +96,112 @@ class TestUnrealRenderStepHandler:
             log_mock.assert_called_with(
                 f"Shots in task: {[shot.outer_name for shot in enabled_shots]}"
             )
+
+    def test_copy_pipeline_queue_from_manifest_file(self, unreal_render_step_handler):
+        # GIVEN
+        manifest_content = '{"test": "manifest", "queue": "data"}'
+        manifest_path = "manifest.utxt"
+        
+        mock_queue_subsystem = MagicMock()
+        mock_pipeline_queue = MagicMock()
+        mock_manifest_queue = MagicMock()
+        
+        # Ensure all mocks are properly configured and won't throw exceptions
+        mock_queue_subsystem.get_queue.return_value = mock_pipeline_queue
+        mock_pipeline_queue.delete_all_jobs.return_value = None
+        mock_pipeline_queue.copy_from.return_value = None
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.return_value = mock_manifest_queue
+
+        # WHEN
+        with patch(
+            "deadline.unreal_adaptor.UnrealClient.step_handlers."
+            "unreal_render_step_handler.logger.warning"
+        ) as mock_warning:
+            with patch(
+                "deadline.unreal_adaptor.UnrealClient.step_handlers."
+                "unreal_render_step_handler.logger.info"
+            ) as mock_info:
+                # Reset the mock to ensure clean state
+                unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.reset_mock()
+                mock_queue_subsystem.reset_mock()
+                mock_pipeline_queue.reset_mock()
+                
+                # Call the function
+                unreal_render_step_handler.copy_pipeline_queue_from_manifest_file(
+                    mock_queue_subsystem, manifest_path
+                )
+                
+                # Verify no warning was logged (success case)
+                mock_warning.assert_not_called()
+
+        # THEN
+        # Verify Unreal API was called with file path (not file content)
+        # The function should be called with either the original path or a relative path
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.assert_called_once()
+        call_args = unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.call_args[0][0]
+        # Should be called with a path (either original or converted to relative)
+        assert isinstance(call_args, str)
+        assert call_args  # Should not be empty
+        
+        # Verify queue operations
+        mock_queue_subsystem.get_queue.assert_called_once()
+        mock_pipeline_queue.delete_all_jobs.assert_called_once()
+        mock_pipeline_queue.copy_from.assert_called_once_with(mock_manifest_queue)
+
+    def test_copy_pipeline_queue_from_manifest_file_with_file_error(self, unreal_render_step_handler):
+        # GIVEN
+        manifest_path = "/path/to/nonexistent/manifest.utxt"
+        mock_queue_subsystem = MagicMock()
+
+        # WHEN/THEN - Simulate Unreal API throwing an exception
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.side_effect = Exception("File not found")
+        
+        with patch(
+            "deadline.unreal_adaptor.UnrealClient.step_handlers."
+            "unreal_render_step_handler.logger.warning"
+        ) as mock_warning:
+            # Should not raise exception, but log warning and continue
+            unreal_render_step_handler.copy_pipeline_queue_from_manifest_file(
+                mock_queue_subsystem, manifest_path
+            )
+            
+            # Verify warning was logged
+            mock_warning.assert_called_once()
+            warning_call_args = mock_warning.call_args[0][0]
+            assert "Failed to load manifest file" in warning_call_args
+            assert manifest_path in warning_call_args
+            assert "Continuing with workflow" in warning_call_args
+        
+        # Reset the side effect for other tests
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.side_effect = None
+
+    def test_copy_pipeline_queue_from_manifest_file_path_conversion(self, unreal_render_step_handler):
+        """Test that absolute paths are converted to relative paths for Unreal API"""
+        # GIVEN
+        # Mock project directory
+        project_dir = "/project/root"
+        project_file_path = f"{project_dir}/MyProject.uproject"
+        absolute_manifest_path = f"{project_dir}/Saved/manifest.utxt"
+        expected_relative_path = "Saved/manifest.utxt"
+        
+        mock_queue_subsystem = MagicMock()
+        mock_pipeline_queue = MagicMock()
+        mock_manifest_queue = MagicMock()
+        
+        mock_queue_subsystem.get_queue.return_value = mock_pipeline_queue
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.return_value = mock_manifest_queue
+        unreal_mock.Paths.get_project_file_path.return_value = "MyProject.uproject"
+        unreal_mock.Paths.convert_relative_path_to_full.return_value = project_file_path
+
+        # WHEN
+        with patch("os.path.isabs", return_value=True):
+            with patch("os.path.relpath", return_value=expected_relative_path):
+                unreal_render_step_handler.copy_pipeline_queue_from_manifest_file(
+                    mock_queue_subsystem, absolute_manifest_path
+                )
+
+        # THEN
+        # Verify Unreal API was called with relative path
+        unreal_mock.MoviePipelineLibrary.load_manifest_file_from_string.assert_called_once_with(
+            expected_relative_path
+        )
