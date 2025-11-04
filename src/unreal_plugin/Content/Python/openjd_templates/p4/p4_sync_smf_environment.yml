@@ -1,6 +1,7 @@
 name: P4SyncSmf
 variables:
   AWS_SECRET_P4INFO: ''
+  P4_CLIENTS_ROOT_DIRECTORY: 'C:\UnrealProjects'
 script:
   actions:
     onEnter:

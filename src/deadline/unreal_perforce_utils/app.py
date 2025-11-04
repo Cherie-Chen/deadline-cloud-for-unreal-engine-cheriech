@@ -154,6 +154,7 @@ def initial_workspace_sync(
     unreal_project_relative_path: str,
     changelist: Optional[str] = None,
     job_dependencies_descriptor_path: Optional[str] = None,
+    force_full_sync: bool = False,
 ) -> None:
     """
     Do initial workspace synchronization:
@@ -168,6 +169,7 @@ def initial_workspace_sync(
     :param unreal_project_relative_path: path to the .uproject file relative to the workspace root
     :param changelist: Changelist number to sync workspace to
     :param job_dependencies_descriptor_path: Path to JSON file containing job dependencies to sync
+    :param force_full_sync: If True, forces a full sync (previous behavior). If False, syncs only diffs.
     """
 
     logger.info("Workspace initial synchronizing ...")
@@ -190,7 +192,8 @@ def initial_workspace_sync(
 
     for path in paths_to_sync:
         try:
-            workspace.sync(path, changelist=changelist, force=True)
+            # Only use force=True if explicitly requested for full sync
+            workspace.sync(path, changelist=changelist, force=force_full_sync)
         except Exception as e:
             logger.error(f"Initial workspace sync exception: {str(e)}")
 
@@ -245,6 +248,7 @@ def create_workspace(
     overridden_workspace_root: Optional[str] = None,
     changelist: Optional[str] = None,
     job_dependencies_descriptor_path: Optional[str] = None,
+    force_full_sync: bool = False,
 ):
     """
     Create P4 workspace and execute next steps:
@@ -259,6 +263,7 @@ def create_workspace(
     :param overridden_workspace_root: Workspace local path root (Optional, root from template is used by default)
     :param changelist: Changelist to sync workspace to
     :param job_dependencies_descriptor_path: Path to JSON file containing job dependencies to sync
+    :param force_full_sync: If True, forces a full sync. If False, syncs only diffs (default).
     """
 
     logger.info(
@@ -267,7 +272,8 @@ def create_workspace(
         f"Unreal project relative path: {unreal_project_relative_path}\n"
         f"Overridden workspace root: {overridden_workspace_root}\n"
         f"Changelist: {changelist}\n"
-        f"job_dependencies_descriptor_path: {job_dependencies_descriptor_path}"
+        f"job_dependencies_descriptor_path: {job_dependencies_descriptor_path}\n"
+        f"Force full sync: {force_full_sync}"
     )
 
     workspace_specification_template = get_workspace_specification_template_from_file(
@@ -289,6 +295,7 @@ def create_workspace(
         unreal_project_relative_path=unreal_project_relative_path,
         changelist=changelist,
         job_dependencies_descriptor_path=job_dependencies_descriptor_path,
+        force_full_sync=force_full_sync,
     )
 
     configure_project_source_control_settings(
