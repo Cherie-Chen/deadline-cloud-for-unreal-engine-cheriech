@@ -56,6 +56,71 @@ class TestUnrealOpenJobStepParameterDefinition:
         assert param.type == param_type
         assert all([isinstance(v, expected_python_type) for v in param.range])
 
+    def test_from_dict_with_chunks(self):
+        """Test that from_dict correctly handles the chunks field for CHUNK[INT] parameters."""
+        # GIVEN
+        chunks_config = {
+            "defaultTaskCount": 10,
+            "rangeConstraint": "CONTIGUOUS",
+            "targetRuntimeSeconds": 300,
+        }
+        param_dict = {
+            "name": "Frames",
+            "type": "CHUNK[INT]",
+            "range": "1-100",
+            "chunks": chunks_config,
+        }
+
+        # WHEN
+        param = UnrealOpenJobStepParameterDefinition.from_dict(param_dict)
+
+        # THEN
+        assert param.name == "Frames"
+        assert param.type == "CHUNK[INT]"
+        assert param.range == "1-100"
+        assert param.chunks == chunks_config
+
+    def test_from_dict_without_chunks(self):
+        """Test that from_dict works without chunks field for backward compatibility."""
+        # GIVEN
+        param_dict = {
+            "name": "TaskChunkId",
+            "type": "INT",
+            "range": [0, 1, 2],
+        }
+
+        # WHEN
+        param = UnrealOpenJobStepParameterDefinition.from_dict(param_dict)
+
+        # THEN
+        assert param.name == "TaskChunkId"
+        assert param.type == "INT"
+        assert param.range == [0, 1, 2]
+        assert param.chunks is None
+
+    def test_to_dict_with_chunks(self):
+        """Test that to_dict includes the chunks field when present."""
+        # GIVEN
+        chunks_config = {
+            "defaultTaskCount": 5,
+            "rangeConstraint": "NONCONTIGUOUS",
+        }
+        param = UnrealOpenJobStepParameterDefinition(
+            name="Frames",
+            type="CHUNK[INT]",
+            range="1-50",
+            chunks=chunks_config,
+        )
+
+        # WHEN
+        result = param.to_dict()
+
+        # THEN
+        assert result["name"] == "Frames"
+        assert result["type"] == "CHUNK[INT]"
+        assert result["range"] == "1-50"
+        assert result["chunks"] == chunks_config
+
 
 class TestUnrealOpenJobStep:
 

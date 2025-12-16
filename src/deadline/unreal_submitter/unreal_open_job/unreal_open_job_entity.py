@@ -212,13 +212,14 @@ class ParameterDefinitionDescriptor:
     """
     Data class for converting C++, OpenJD and generic Python classes between each other
 
-    :cvar type_name: OpenJD type (INT, FLOAT, STRING, PATH)
+    :cvar type_name: OpenJD type (INT, FLOAT, STRING, PATH, CHUNK[INT])
     :cvar job_parameter_openjd_class: OpenJD class for int, float, string, path Job parameter
     :cvar task_parameter_openjd_class: OpenJD class for int, float, string, path Step parameter
     :cvar python_class: Appropriate python class (int, float, string, path)
+    :cvar is_chunk_type: Whether this is a CHUNK[*] type requiring special handling
     """
 
-    type_name: Literal["INT", "FLOAT", "STRING", "PATH"]
+    type_name: Literal["INT", "FLOAT", "STRING", "PATH", "CHUNK[INT]"]
     job_parameter_openjd_class: type[
         Union[
             JobIntParameterDefinition,
@@ -237,6 +238,7 @@ class ParameterDefinitionDescriptor:
         ]
     ]
     python_class: type[Union[int, float, str]]
+    is_chunk_type: bool = False
 
 
 PARAMETER_DEFINITION_MAPPING = {
@@ -251,6 +253,16 @@ PARAMETER_DEFINITION_MAPPING = {
     ),
     "PATH": ParameterDefinitionDescriptor(
         "PATH", JobPathParameterDefinition, "path_value", PathTaskParameterDefinition, str
+    ),
+    # CHUNK[INT] is a special type that generates STRING task parameters with chunk values
+    # The chunks configuration is processed at submission time to generate the range values
+    "CHUNK[INT]": ParameterDefinitionDescriptor(
+        "CHUNK[INT]",
+        JobStringParameterDefinition,  # Range expression is passed as string job param
+        "string_value",
+        StringTaskParameterDefinition,  # Chunk values are strings like "1-10"
+        str,
+        is_chunk_type=True,
     ),
 }
 
@@ -301,6 +313,10 @@ class OpenJobStepParameterNames:
     :cvar FRAMES_PER_TASK: If set, each task will render this number of frames
     :cvar TASK_CHUNK_SIZE: Count of the shots per OpenJD Step's Task unless FRAMES_PER_TASK set
     :cvar TASK_CHUNK_ID: Chunk number that should be rendered at OpenJD Step's Task
+
+    CHUNK[INT] related parameters:
+    :cvar FRAME_CHUNK: Frame chunk parameter for CHUNK[INT] type (e.g., "1-10" or "1,3,5")
+    :cvar RANGE_CONSTRAINT: Range constraint for chunk format (CONTIGUOUS or NONCONTIGUOUS)
     """
 
     QUEUE_MANIFEST_PATH = "QueueManifestPath"
@@ -314,3 +330,7 @@ class OpenJobStepParameterNames:
     FRAMES_PER_TASK = "FramesPerTask"
     TASK_CHUNK_SIZE = "ChunkSize"
     TASK_CHUNK_ID = "ChunkId"
+
+    # Chunking related parameters
+    FRAME_CHUNK = "Frame"
+    RANGE_CONSTRAINT = "RangeConstraint"

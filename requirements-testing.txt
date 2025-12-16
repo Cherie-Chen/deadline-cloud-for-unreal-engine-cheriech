@@ -8,3 +8,4 @@ black == 25.*
 ruff == 0.14.*
 types-pyyaml == 6.*
 psutil >= 5.9.0
+hypothesis >= 6.0

@@ -99,3 +99,4 @@ gen
 
 # Kiro IDE files
 .kiro/
+.hypothesis/

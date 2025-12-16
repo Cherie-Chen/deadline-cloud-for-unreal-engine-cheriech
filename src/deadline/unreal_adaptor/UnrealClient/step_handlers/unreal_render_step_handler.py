@@ -13,10 +13,11 @@ except Exception:
     )
     unreal = None
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from .base_step_handler import BaseStepHandler
 from deadline.unreal_logger import get_logger
+from deadline.unreal_range_expr import RangeExpressionError, RangeExpressionParser
 
 
 logger = get_logger()
@@ -329,6 +330,56 @@ class UnrealRenderStepHandler(BaseStepHandler):
             UnrealRenderStepHandler.cached_frame_range_end,
         )
 
+    @staticmethod
+    def parse_frame_chunk(chunk_value: str) -> Tuple[int, int]:
+        """
+        Parse a CHUNK[INT] contiguous chunk value into start/end frames.
+
+        Args:
+            chunk_value: The chunk string (e.g., "1-10" or "5-5" for single frame)
+
+        Returns:
+            Tuple of (start_frame, end_frame) inclusive
+
+        Raises:
+            RangeExpressionError: If format is invalid or not a contiguous range
+        """
+        try:
+            frames = RangeExpressionParser.parse(chunk_value)
+        except RangeExpressionError:
+            raise
+
+        if not frames:
+            raise RangeExpressionError("Chunk resulted in empty frame list")
+
+        # For contiguous chunks, we expect a continuous sequence
+        # Return the min and max as start/end
+        return (min(frames), max(frames))
+
+    @staticmethod
+    def parse_frame_chunk_noncontiguous(chunk_value: str) -> List[int]:
+        """
+        Parse a CHUNK[INT] non-contiguous chunk value into a list of frame numbers.
+
+        Args:
+            chunk_value: The chunk string (e.g., "1,3,5-10" or "1-10:2")
+
+        Returns:
+            Sorted list of frame numbers
+
+        Raises:
+            RangeExpressionError: If format is invalid
+        """
+        try:
+            frames = RangeExpressionParser.parse(chunk_value)
+        except RangeExpressionError:
+            raise
+
+        if not frames:
+            raise RangeExpressionError("Chunk resulted in empty frame list")
+
+        return frames
+
     def run_script(self, args: dict) -> bool:
         """
         Create the unreal.MoviePipelineQueue object and render it with the render executor
@@ -367,7 +418,54 @@ class UnrealRenderStepHandler(BaseStepHandler):
         if "chunk_id" in args:
             chunk_id: int = args["chunk_id"]
         for job in subsystem.get_queue().get_jobs():
-            if args.get("frames_per_task") and "chunk_id" in args:
+            # New CHUNK[INT] format: frame_chunk contains the actual frame range string
+            if "frame_chunk" in args:
+                frame_chunk: str = args["frame_chunk"]
+                range_constraint: str = args.get("range_constraint", "CONTIGUOUS")
+
+                if not output_settings:
+                    output_settings = job.get_configuration().find_or_add_setting_by_class(
+                        unreal.MoviePipelineOutputSetting
+                    )
+
+                try:
+                    if range_constraint == "NONCONTIGUOUS":
+                        # Non-contiguous: parse as list of frames, use min/max for range
+                        frames = self.parse_frame_chunk_noncontiguous(frame_chunk)
+                        chunk_start = min(frames)
+                        chunk_end = max(frames)
+                        logger.info(
+                            f"Parsed non-contiguous frame chunk '{frame_chunk}' -> {len(frames)} frames, range {chunk_start}-{chunk_end}"
+                        )
+                    else:
+                        # Contiguous: parse as start-end range
+                        chunk_start, chunk_end = self.parse_frame_chunk(frame_chunk)
+                        logger.info(
+                            f"Parsed contiguous frame chunk '{frame_chunk}' -> range {chunk_start}-{chunk_end}"
+                        )
+
+                    # Configure MRQ output settings with the parsed frame range
+                    output_settings.use_custom_playback_range = True
+                    output_settings.custom_start_frame = chunk_start
+                    output_settings.custom_end_frame = chunk_end
+
+                    level_sequence = unreal.EditorAssetLibrary.load_asset(
+                        unreal.SystemLibrary.conv_soft_object_reference_to_string(
+                            unreal.SystemLibrary.conv_soft_obj_path_to_soft_obj_ref(job.sequence)
+                        )
+                    )
+                    level_sequence.set_playback_start(chunk_start)
+                    level_sequence.set_playback_end(chunk_end)
+                    logger.info(
+                        f"Rendering frame chunk from {chunk_start} to {chunk_end} "
+                        f"with sequence playback start {level_sequence.get_playback_start()} "
+                        f"end {level_sequence.get_playback_end()}"
+                    )
+                except RangeExpressionError as e:
+                    raise RuntimeError(f"Failed to parse frame chunk '{frame_chunk}': {e}")
+
+            # Legacy format: chunk_id + frames_per_task
+            elif args.get("frames_per_task") and "chunk_id" in args:
                 frames_per_task: int = args["frames_per_task"]
                 if not output_settings:
                     output_settings = job.get_configuration().find_or_add_setting_by_class(
@@ -393,6 +491,8 @@ class UnrealRenderStepHandler(BaseStepHandler):
                 logger.info(
                     f"Rendering custom frame range from {output_settings.custom_start_frame} to {output_settings.custom_end_frame} with sequence playback start {level_sequence.get_playback_start()} end {level_sequence.get_playback_end()}"
                 )
+
+            # Legacy format: chunk_id + chunk_size (shot-based chunking)
             elif "chunk_size" in args and "chunk_id" in args:
                 chunk_size: int = args["chunk_size"]
                 UnrealRenderStepHandler.enable_shots_by_chunk(

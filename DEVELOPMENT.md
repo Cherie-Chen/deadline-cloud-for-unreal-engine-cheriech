@@ -133,6 +133,18 @@ The user guide is generated from the markdown files in `docs/user_guide` and pub
 
 ## Troubleshooting
 
+### ModuleNotFoundError After Adding Dependencies
+
+Error: `ModuleNotFoundError: No module named '<package>'`
+
+Root Cause: Hatch caches virtual environments. After adding new dependencies to `requirements-***.txt` and run `pip install -r requirements-***.txt`,
+the cached environment may not include the new dependencies.
+
+Solution: Clear the cached environment and recreate it:
+```bash
+hatch env prune
+```
+
 ### Credential Configuration Errors
 
 Error: No valid credentials for ### available.

@@ -12,6 +12,14 @@ RENDER_JOB_TEMPLATE_DEFAULT_PATH = "render_job.yml"
 RENDER_STEP_TEMPLATE_DEFAULT_PATH = "render_step.yml"
 LAUNCH_ENVIRONMENT_TEMPLATE_DEFAULT_PATH = "launch_ue_environment.yml"
 
+# Dynamic chunking rendering templates (CHUNK[INT] support)
+DYNAMIC_CHUNKING_RENDER_JOB_TEMPLATE_DEFAULT_PATH = (
+    "dynamic_chunking/dynamic_chunking_render_job.yml"
+)
+DYNAMIC_CHUNKING_RENDER_STEP_TEMPLATE_DEFAULT_PATH = (
+    "dynamic_chunking/dynamic_chunking_render_step.yml"
+)
+
 UGS_RENDER_JOB_TEMPLATE_DEFAULT_PATH = "ugs/ugs_render_job.yml"
 UGS_RENDER_STEP_TEMPLATE_DEFAULT_PATH = "ugs/ugs_render_step.yml"
 UGS_LAUNCH_ENVIRONMENT_TEMPLATE_DEFAULT_PATH = "ugs/ugs_launch_ue_environment.yml"
