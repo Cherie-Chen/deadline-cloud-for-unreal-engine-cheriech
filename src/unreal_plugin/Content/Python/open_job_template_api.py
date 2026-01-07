@@ -71,6 +71,10 @@ class PythonYamlLibraryImplementation(unreal.PythonYamlLibrary):
                     unreal.UserInterfaceControl.LINE_EDIT
                 )
 
+        # Map userInterface.label to display label
+        if "userInterface" in job_parameter and "label" in job_parameter["userInterface"]:
+            u_parameter_definition.label = job_parameter["userInterface"]["label"]
+
         return u_parameter_definition
 
     @staticmethod

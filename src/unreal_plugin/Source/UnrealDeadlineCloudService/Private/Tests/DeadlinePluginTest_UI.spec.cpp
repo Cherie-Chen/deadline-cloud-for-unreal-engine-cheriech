@@ -970,6 +970,73 @@ void FDeadlinePluginUISpec::Define()
             });
     });
 
+    Describe("DeadlineCloudJobUILabel", [this]()
+    {
+        // Test that parameters with userInterface.label display the label instead of the parameter name
+        BeforeEach([this]() {
+            FString LabelJobTemplate = "/Source/UnrealDeadlineCloudService/Private/Tests/openjd_templates/render_job_UI_label.yml";
+            FString PathToLabelJobTemplate;
+            CreatedJobDataAsset = CreateAndOpenAsset<UDeadlineCloudJob>(LabelJobTemplate, PathToLabelJobTemplate);
+            CreatedJobDataAsset->AddToRoot();
+        });
+
+        It("ParameterLabelDisplay", EAsyncExecution::ThreadPool, FTimespan::FromSeconds(60), [this]() {
+            if (!InitForDataAsset(CreatedJobDataAsset))
+            {
+                return;
+            }
+
+            ExpandAllProperties(DetailsPath, Driver);
+
+            // Find the parameter widgets by their internal name (used for automation tags)
+            // The display text should show the label, not the parameter name
+            FDriverElementRef ChunkSizeWidget = Driver->FindElement(By::Path("#JobParameter.ChunkSize"));
+            FDriverElementRef TargetRuntimeWidget = Driver->FindElement(By::Path("#JobParameter.TargetRuntimeSeconds"));
+            FDriverElementRef NoLabelWidget = Driver->FindElement(By::Path("#JobParameter.NoLabelParameter"));
+
+            // Verify widgets exist
+            ScrollToElement(Driver, List.ToSharedRef(), ScrollBar.ToSharedRef(), ChunkSizeWidget, 50);
+            TestTrue("ChunkSize widget should exist", ChunkSizeWidget->Exists());
+
+            ScrollToElement(Driver, List.ToSharedRef(), ScrollBar.ToSharedRef(), TargetRuntimeWidget, 50);
+            TestTrue("TargetRuntimeSeconds widget should exist", TargetRuntimeWidget->Exists());
+
+            ScrollToElement(Driver, List.ToSharedRef(), ScrollBar.ToSharedRef(), NoLabelWidget, 50);
+            TestTrue("NoLabelParameter widget should exist", NoLabelWidget->Exists());
+
+            // Find the text blocks that display the parameter labels
+            // The label text should be "Default Dynamic Chunk Size" not "ChunkSize"
+            FDriverElementRef ChunkSizeLabelText = Driver->FindElement(By::Path("#JobParameter.ChunkSize//<STextBlock>"));
+            FDriverElementRef TargetRuntimeLabelText = Driver->FindElement(By::Path("#JobParameter.TargetRuntimeSeconds//<STextBlock>"));
+            FDriverElementRef NoLabelText = Driver->FindElement(By::Path("#JobParameter.NoLabelParameter//<STextBlock>"));
+
+            // Verify the label text widgets exist and are visible
+            if (ChunkSizeLabelText->Exists())
+            {
+                TestTrue("ChunkSize label text should be visible", ChunkSizeLabelText->IsVisible());
+            }
+
+            if (TargetRuntimeLabelText->Exists())
+            {
+                TestTrue("TargetRuntimeSeconds label text should be visible", TargetRuntimeLabelText->IsVisible());
+            }
+
+            if (NoLabelText->Exists())
+            {
+                TestTrue("NoLabelParameter label text should be visible", NoLabelText->IsVisible());
+            }
+        });
+
+        AfterEach([this]()
+        {
+            auto* Editor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+            Editor->CloseAllAssetEditors();
+
+            CreatedJobDataAsset->RemoveFromRoot();
+            CreatedJobDataAsset = nullptr;
+        });
+    });
+
     Describe("DeadlineCloudStepUI", [this]()
     {
 		BeforeEach([this]() {

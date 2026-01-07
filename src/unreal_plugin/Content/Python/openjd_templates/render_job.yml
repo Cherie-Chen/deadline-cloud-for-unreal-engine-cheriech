@@ -14,6 +14,7 @@ parameterDefinitions:
   default: '-log'
   userInterface: 
    control: LINE_EDIT
+   label: Extra Cmd Args
 - name: ExtraCmdArgsFile
   type: PATH
   objectType: FILE
@@ -33,11 +34,13 @@ parameterDefinitions:
   default: unrealengine=5.6 unrealengine-openjd=0.6.*
   userInterface: 
    control: LINE_EDIT
+   label: Conda Packages
 - name: CondaChannels
   type: STRING
   default: deadline-cloud
   userInterface: 
    control: LINE_EDIT
+   label: Conda Channels
 - name: ChunkSize
   type: INT
   default: 1

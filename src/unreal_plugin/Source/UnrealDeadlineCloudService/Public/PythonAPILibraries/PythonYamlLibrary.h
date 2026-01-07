@@ -68,11 +68,15 @@ struct FParameterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Job")
 	EUserInterfaceControl UserInterfaceControl;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Job")
+	FString Label;
+
 	FParameterDefinition()
 		: Name("DefaultName"),
 		 Type(EValueType::STRING),
 		 Value(""),
-		 UserInterfaceControl(EUserInterfaceControl::LINE_EDIT)
+		 UserInterfaceControl(EUserInterfaceControl::LINE_EDIT),
+		 Label("")
 	{}
 
 

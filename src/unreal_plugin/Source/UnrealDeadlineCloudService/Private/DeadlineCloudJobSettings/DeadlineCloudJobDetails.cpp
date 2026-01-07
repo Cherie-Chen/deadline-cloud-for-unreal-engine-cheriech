@@ -486,6 +486,19 @@ void FDeadlineCloudJobParametersArrayBuilder::OnGenerateEntry(TSharedRef<IProper
     FString ParameterName;
     NameHandle->GetValue(ParameterName);
 
+    // Get label for display (use label if available, otherwise use name)
+    const TSharedPtr<IPropertyHandle> LabelHandle = ElementProperty->GetChildHandle("Label", false);
+    FString DisplayLabel = ParameterName;
+    if (LabelHandle.IsValid())
+    {
+        FString LabelValue;
+        LabelHandle->GetValue(LabelValue);
+        if (!LabelValue.IsEmpty())
+        {
+            DisplayLabel = LabelValue;
+        }
+    }
+
     const TSharedPtr<IPropertyHandle> ValueHandle = ElementProperty->GetChildHandle("Value", false);
     if (!NameHandle.IsValid())
     {
@@ -541,7 +554,7 @@ void FDeadlineCloudJobParametersArrayBuilder::OnGenerateEntry(TSharedRef<IProper
                 .FillWidth(1)
                 [
                     SNew(STextBlock)
-                        .Text(FText::FromString(ParameterName))
+                        .Text(FText::FromString(DisplayLabel))
                         .Font(IDetailLayoutBuilder::GetDetailFont())
                         .ColorAndOpacity(FSlateColor::UseForeground())
                 ]

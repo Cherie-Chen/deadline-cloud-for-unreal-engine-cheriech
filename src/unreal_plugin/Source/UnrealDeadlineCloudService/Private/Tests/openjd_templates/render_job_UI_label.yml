@@ -1,0 +1,24 @@
+specificationVersion: jobtemplate-2023-09
+name: RenderJobWithLabels
+parameterDefinitions:
+- name: ChunkSize
+  type: INT
+  default: 50
+  minValue: 1
+  description: 'Default number of frames to include in a dynamic chunk'
+  userInterface:
+   control: SPIN_BOX
+   label: Default Dynamic Chunk Size
+- name: TargetRuntimeSeconds
+  type: INT
+  default: 0
+  minValue: 0
+  description: 'Target runtime in seconds per chunk'
+  userInterface:
+   control: SPIN_BOX
+   label: Target Runtime Seconds
+- name: NoLabelParameter
+  type: INT
+  default: 10
+  userInterface:
+   control: SPIN_BOX
