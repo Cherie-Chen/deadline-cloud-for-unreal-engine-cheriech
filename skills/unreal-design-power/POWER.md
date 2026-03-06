@@ -8,6 +8,24 @@ author: "AWS Deadline Cloud Team"
 
 # Unreal Engine Design Power
 
+## Start of Session
+
+Prompt user:
+```
+What would you like to do?
+1. Start a new design
+2. Refine an existing design (from docs/design/)
+```
+
+**If new design:**
+- Ask user to describe the feature
+- Guide through design-doc-template.md from Section 1
+
+**If refining existing design:**
+- Ask which design doc in `docs/design/`
+- Read the existing design
+- Ask what needs to change or improve
+
 ## AI Agent Responsibilities
 
 AI Agent co-design features with the user for Unreal Engine integration with AWS Deadline Cloud.
