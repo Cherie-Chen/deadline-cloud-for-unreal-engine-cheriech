@@ -12,8 +12,13 @@ from enum import Enum
 from typing import Callable
 
 from deadline.client.api import (
+    AwsAuthenticationStatus,
+    check_authentication_status,
     get_deadline_cloud_library_telemetry_client,
+    login,
 )
+from deadline.client.api import AwsCredentialsSource
+from deadline.client.config import config_file
 
 from deadline.unreal_logger import get_logger
 from deadline.unreal_submitter.unreal_open_job.unreal_open_job import (
@@ -308,6 +313,82 @@ class UnrealSubmitter:
 
         unreal.EditorDialog.show_message(title=title, message=message, message_type=message_type)
 
+    def _check_credentials(self) -> bool:
+        """
+        Check if AWS credentials are valid before submission.
+
+        If credentials are expired or need login, shows a friendly dialog
+        offering to open Deadline Cloud Monitor for re-authentication.
+
+        :return: True if credentials are valid, False if submission should be aborted.
+        :rtype: bool
+        """
+        try:
+            config = config_file.read_config()
+            creds_status = check_authentication_status(config=config)
+        except Exception as e:
+            logger.warning(f"Could not check credentials status: {e}")
+            # Don't block submission on check failure — let it fail later with the real error
+            return True
+
+        if creds_status == AwsAuthenticationStatus.AUTHENTICATED:
+            return True
+
+        # Credentials are not valid — offer to log in
+        if self._silent_mode:
+            logger.error(
+                "AWS credentials are not valid. "
+                "Please log in using Deadline Cloud Monitor and try again."
+            )
+            return False
+
+        response = unreal.EditorDialog.show_message(
+            title="Deadline Cloud - Login Required",
+            message=(
+                "Your AWS credentials have expired or are not configured.\n\n"
+                "Would you like to open Deadline Cloud Monitor to log in?"
+            ),
+            message_type=unreal.AppMsgType.YES_NO,
+        )
+
+        if response != unreal.AppReturnType.YES:
+            return False
+
+        # Attempt login via Deadline Cloud Monitor
+        def on_pending_authorization(**kwargs):
+            if (
+                kwargs.get("credentials_source")
+                == AwsCredentialsSource.DEADLINE_CLOUD_MONITOR_LOGIN
+            ):
+                unreal.EditorDialog.show_message(
+                    "Deadline Cloud",
+                    "Opening Deadline Cloud Monitor. " "Please log in before returning here.",
+                    unreal.AppMsgType.OK,
+                    unreal.AppReturnType.OK,
+                )
+
+        def on_cancellation_check():
+            return False
+
+        success_message = login(
+            on_pending_authorization,
+            on_cancellation_check,
+            config=None,
+        )
+
+        if success_message:
+            logger.info(f"Login successful: {success_message}")
+            self.show_message_dialog(
+                message=success_message, title="Deadline Cloud - Login Successful"
+            )
+            return True
+        else:
+            self.show_message_dialog(
+                message="Login was not completed. Job submission cancelled.",
+                title="Deadline Cloud - Login Required",
+            )
+            return False
+
     @error_notify("Submission failed")
     def submit_jobs(self) -> list[str]:
         """
@@ -315,6 +396,11 @@ class UnrealSubmitter:
         """
 
         del self.submitted_job_ids[:]
+
+        # Pre-flight credentials check
+        if not self._check_credentials():
+            del self._jobs[:]
+            return self.submitted_job_ids
 
         # Get project root directory as absolute path
         project_dir = os.path.abspath(unreal.Paths.project_dir())
