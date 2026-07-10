@@ -128,6 +128,20 @@ class UnrealOpenJobParameterDefinition:
         return asdict(self)
 
 
+@dataclass
+class _PreGuiHookSettings:
+    """Minimal settings object matching the shape deadline-cloud's ``apply_pre_gui_output``
+    expects: assignable ``name`` / ``description`` plus a ``parameters`` list of
+    ``{"name", "value"}`` dicts. It bridges that generic helper onto :class:`UnrealOpenJob`,
+    whose ``name`` is a read-only property and whose parameters live as
+    ``UnrealOpenJobParameterDefinition`` dataclasses rather than dicts.
+    """
+
+    name: str
+    description: str
+    parameters: list[dict[str, Any]]
+
+
 # Base Open Job implementation
 class UnrealOpenJob(UnrealOpenJobEntity):
     """
@@ -187,6 +201,10 @@ class UnrealOpenJob(UnrealOpenJobEntity):
 
         self._transfer_files_strategy = TransferProjectFilesStrategy.S3
 
+        # Optional Job description; only emitted into the template when set (e.g. by a
+        # pre-GUI hook via :meth:`apply_pre_gui_output`).
+        self._description: str = ""
+
     @property
     def job_shared_settings(self) -> JobSharedSettings:
         return self._job_shared_settings
@@ -194,6 +212,15 @@ class UnrealOpenJob(UnrealOpenJobEntity):
     @job_shared_settings.setter
     def job_shared_settings(self, value: JobSharedSettings):
         self._job_shared_settings = value
+
+    @property
+    def description(self) -> str:
+        """Returns the Job description (empty unless set, e.g. by a pre-GUI hook)."""
+        return self._description
+
+    @description.setter
+    def description(self, value: str):
+        self._description = value
 
     @classmethod
     def from_data_asset(cls, data_asset: unreal.DeadlineCloudJob) -> "UnrealOpenJob":
@@ -249,6 +276,7 @@ class UnrealOpenJob(UnrealOpenJobEntity):
             "specificationVersion",
             "extensions",
             "name",
+            "description",
             "parameterDefinitions",
             "jobEnvironments",
             "steps",
@@ -283,6 +311,89 @@ class UnrealOpenJob(UnrealOpenJobEntity):
         if param:
             param["value"] = job_parameter_value
         return job_parameter_values
+
+    def apply_pre_gui_output(self, pre_gui_output: dict[str, Any]) -> None:
+        """Apply merged pre-GUI hook output onto this Job.
+
+        Delegates the routing to deadline-cloud's public
+        :func:`deadline.client.ui.pre_gui_hooks.apply_pre_gui_output`, which is generic across
+        submitters, then writes the routed result back onto this Job. Unlike the standalone
+        submitter's ``JobBundleSettings``, :class:`UnrealOpenJob` has a read-only ``name``
+        property and stores parameters as :class:`UnrealOpenJobParameterDefinition` dataclasses,
+        so a small ``_PreGuiHookSettings`` adapter bridges the two shapes.
+
+        Mapping of the merged hook output:
+
+        * ``name`` / ``description`` overwrite this Job's name and description.
+        * ``parameters`` whose name matches one of this Job's parameters update that parameter's
+          value in place.
+        * ``parameters`` named ``deadline:priority`` / ``deadline:maxFailedTasksCount`` /
+          ``deadline:maxRetriesPerTask`` / ``deadline:targetTaskRunStatus`` update the Job's
+          shared settings.
+        * Any other parameter has no home on an Unreal Job (there is no submission dialog to hold
+          arbitrary queue parameters) and is logged and skipped.
+
+        :param pre_gui_output: Merged output from
+            :func:`deadline.client.ui.pre_gui_hooks.run_pre_gui_hooks`
+            (any of ``name``, ``description``, ``parameters``). An empty dict is a no-op.
+        :type pre_gui_output: dict[str, Any]
+        """
+
+        if not pre_gui_output:
+            return
+
+        # Imported lazily (not at module top): the pre_gui_hooks module ships in deadline-cloud
+        # 0.60.1+, and a top-level import would break importing this module — and every unit test
+        # that collects it — against older deadline-cloud releases.
+        from deadline.client.ui.pre_gui_hooks import (  # pylint: disable=import-error
+            apply_pre_gui_output as _apply_pre_gui_output,
+        )
+
+        # Adapt this Job to the shape the generic helper expects (assignable name/description +
+        # a parameters list of {"name", "value"} dicts). Routing template-parameter values in
+        # place lets the helper decide, per name, whether a hook value targets a Job parameter
+        # or a shared value — the same decision it makes for the standalone submitter.
+        settings = _PreGuiHookSettings(
+            name=self.name,
+            description=self.description,
+            parameters=[{"name": p.name, "value": p.value} for p in self._extra_parameters],
+        )
+        shared_parameter_values: dict[str, Any] = {}
+
+        _apply_pre_gui_output(pre_gui_output, settings, shared_parameter_values)
+
+        # Write name / description back (name has no public setter on UnrealOpenJob).
+        self._name = settings.name
+        self._description = settings.description
+
+        # Write template-parameter values back onto the matching extra parameters.
+        applied_values = {p["name"]: p["value"] for p in settings.parameters}
+        for extra_param in self._extra_parameters:
+            if extra_param.name in applied_values:
+                extra_param.value = applied_values[extra_param.name]
+
+        # Route the remaining (non-template) hook parameters. Only the deadline: shared settings
+        # have a home on an Unreal Job; anything else can't be applied and is surfaced to the user.
+        # We update the shared settings' serialized parameter_values in place, since that list —
+        # not the backing fields — is what create_job_bundle() emits.
+        shared_param_values = self._job_shared_settings.parameter_values
+        shared_setting_names = {p["name"] for p in shared_param_values}
+        unapplied: list[str] = []
+        for name, value in shared_parameter_values.items():
+            if name in shared_setting_names:
+                for p in shared_param_values:
+                    if p["name"] == name:
+                        p["value"] = value
+                        break
+            else:
+                unapplied.append(name)
+
+        if unapplied:
+            logger.warning(
+                "Pre-GUI hook parameter(s) %s do not match any Unreal Job template parameter or "
+                "shared setting and were not applied.",
+                ", ".join(sorted(unapplied)),
+            )
 
     def _create_missing_extra_parameters_from_template(self):
         """
@@ -388,6 +499,9 @@ class UnrealOpenJob(UnrealOpenJobEntity):
             ],
             "steps": [s.build_template() for s in self._steps],
         }
+
+        if self._description:
+            template_dict["description"] = self._description
 
         extension_list = self.get_template_object().get("extensions")
 

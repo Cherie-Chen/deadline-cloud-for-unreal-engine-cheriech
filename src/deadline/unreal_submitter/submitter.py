@@ -14,6 +14,8 @@ from typing import Callable
 from deadline.client.api import (
     get_deadline_cloud_library_telemetry_client,
 )
+from deadline.client.config import get_setting, str2bool
+from deadline.client.exceptions import DeadlineOperationCanceled
 
 from deadline.unreal_logger import get_logger
 from deadline.unreal_submitter.unreal_open_job.unreal_open_job import (
@@ -307,6 +309,85 @@ class UnrealSubmitter:
 
         unreal.EditorDialog.show_message(title=title, message=message, message_type=message_type)
 
+    def _unreal_hook_confirmation(self, sources: list) -> bool:
+        """Show the standard "these hooks will run" confirmation in the Unreal Editor UI.
+
+        This is the Unreal-native analog of deadline-cloud's ``qt_hook_confirmation`` (Unreal
+        submitters have no Qt). Returns ``True`` to proceed, ``False`` to cancel. In silent mode
+        there is no UI to prompt in, so it proceeds without asking.
+
+        :param sources: List of ``HookManager`` sources whose pre-GUI hooks will run.
+        :return: Whether the user accepted running the hooks.
+        :rtype: bool
+        """
+        from deadline.client.job_bundle._hooks import _generate_hooks_confirmation_message
+
+        if self._silent_mode:
+            return True
+
+        # Pass source_label so an environment-configured hook source (DEADLINE_HOOKS_DIR) is not
+        # shown to the user as if it came from the job bundle — this prompt is the user's
+        # informed-consent point for running arbitrary code. Mirrors deadline-cloud's
+        # qt_hook_confirmation.
+        confirmation_msg = (
+            "".join(
+                _generate_hooks_confirmation_message(
+                    m.hooks, m._original_bundle_dir, m.source_label
+                )
+                for m in sources
+                if m.hooks
+            )
+            + "Do you want to run these hooks?"
+        )
+        reply = unreal.EditorDialog.show_message(
+            "Job Submission Confirmation",
+            confirmation_msg,
+            unreal.AppMsgType.YES_NO,
+            unreal.AppReturnType.NO,
+        )
+        return reply == unreal.AppReturnType.YES
+
+    def _run_pre_gui_hooks(self) -> None:
+        """Run pre-GUI submission hooks for every queued Job and apply their output.
+
+        Unreal submitters have no ``SubmitJobToDeadlineDialog``; this is the submission-time
+        analog of the Maya/Nuke "before the dialog opens" hook point. Unreal has no on-disk job
+        bundle here, so hooks are sourced from ``DEADLINE_HOOKS_DIR`` only (``bundle_dir=None``),
+        gated by ``settings.allow_environment_hooks``. The confirmation prompt is shown once (the
+        env hooks are the same for every Job) and skipped when ``settings.auto_accept`` is set or
+        the submitter is running silently.
+
+        :raises deadline.client.exceptions.DeadlineOperationCanceled: If the user declines the
+            hook confirmation prompt.
+        """
+        # Imported lazily (not at module top): the pre_gui_hooks module ships in deadline-cloud
+        # 0.60.1+, and a top-level import would break importing this module — and every unit test
+        # that collects it — against older deadline-cloud releases.
+        from deadline.client.ui.pre_gui_hooks import (  # pylint: disable=import-error
+            PreGuiHookContext,
+            run_pre_gui_hooks,
+        )
+
+        confirm_callback = (
+            None
+            if str2bool(get_setting("settings.auto_accept"))
+            else self._unreal_hook_confirmation
+        )
+
+        for i, job in enumerate(self._jobs):
+            pre_gui_output = run_pre_gui_hooks(
+                PreGuiHookContext(
+                    bundle_dir=None,
+                    job_name=job.name,
+                    submitter_name="unreal",
+                ),
+                # Only prompt for the first Job; the env-sourced hooks are identical across the
+                # queue, so re-prompting per Job would be redundant. Later Jobs run without a
+                # prompt (equivalent to the user having already accepted).
+                confirm_callback=confirm_callback if i == 0 else None,
+            )
+            job.apply_pre_gui_output(pre_gui_output)
+
     @error_notify("Submission failed")
     def submit_jobs(self) -> list[str]:
         """
@@ -314,6 +395,18 @@ class UnrealSubmitter:
         """
 
         del self.submitted_job_ids[:]
+
+        # Run pre-GUI submission hooks so studios can pre-populate job fields before the bundle
+        # is built. Declining the confirmation prompt cancels the whole submission.
+        try:
+            self._run_pre_gui_hooks()
+        except DeadlineOperationCanceled as e:
+            logger.info(f"Submission canceled by pre-GUI hook confirmation: {e}")
+            self.show_message_dialog(
+                f"Jobs submission canceled.\n" f"Number of unsubmitted jobs: {len(self._jobs)}"
+            )
+            del self._jobs[:]
+            return self.submitted_job_ids
 
         # Get project root directory as absolute path
         project_dir = os.path.abspath(unreal.Paths.project_dir())

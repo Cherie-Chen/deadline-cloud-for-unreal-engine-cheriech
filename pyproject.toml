@@ -28,7 +28,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "deadline >= 0.57,< 0.59",
+    # run_pre_gui_hooks / PreGuiHookContext / apply_pre_gui_output
+    # (deadline.client.ui.pre_gui_hooks) are required for the pre-GUI hook integration in the
+    # submitter. That module shipped in the released deadline-cloud 0.60.1 (added after the
+    # 0.60.0 tag; see aws-deadline/deadline-cloud#1255).
+    "deadline >= 0.60.1,< 0.61",
     "openjd-adaptor-runtime >= 0.9.4,< 0.10",
     "openjd-model >= 0.9.0, < 0.10",
     "p4python == 2025.1.2767466",

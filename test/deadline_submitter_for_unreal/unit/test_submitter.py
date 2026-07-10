@@ -47,6 +47,7 @@ def create_job_from_bundle_mock(
 
 class TestUnrealSubmitter:
 
+    @patch("deadline.unreal_submitter.submitter.UnrealSubmitter._run_pre_gui_hooks")
     @patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")
     @patch("subprocess.Popen")
     @patch("deadline.unreal_submitter.submitter.UnrealOpenJob")
@@ -55,6 +56,7 @@ class TestUnrealSubmitter:
         open_job_mock: Mock,
         popen_mock: Mock,
         mock_telemetry_client: Mock,
+        run_pre_gui_hooks_mock: Mock,
     ):
         # GIVEN
         open_job_mock.create_job_bundle = MagicMock(return_value="/path/to/bundle")
@@ -84,6 +86,7 @@ class TestUnrealSubmitter:
         assert "job_id_1" in submitted_job_ids
         popen_mock.assert_called_once()
 
+    @patch("deadline.unreal_submitter.submitter.UnrealSubmitter._run_pre_gui_hooks")
     @patch("deadline.unreal_submitter.submitter.UnrealSubmitter.show_message_dialog")
     @patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")
     @patch("subprocess.Popen")
@@ -94,6 +97,7 @@ class TestUnrealSubmitter:
         popen_mock: Mock,
         mock_telemetry_client: Mock,
         show_message_dialog_mock: Mock,
+        run_pre_gui_hooks_mock: Mock,
     ):
         # GIVEN
         open_job_mock.create_job_bundle = MagicMock(return_value="/path/to/bundle")
@@ -115,6 +119,7 @@ class TestUnrealSubmitter:
         # THEN
         assert "Jobs submission canceled" in show_message_dialog_mock.mock_calls[0].args[0]
 
+    @patch("deadline.unreal_submitter.submitter.UnrealSubmitter._run_pre_gui_hooks")
     @patch("deadline.unreal_submitter.submitter.UnrealSubmitter.show_message_dialog")
     @patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")
     @patch("subprocess.Popen")
@@ -125,6 +130,7 @@ class TestUnrealSubmitter:
         popen_mock: Mock,
         mock_telemetry_client: Mock,
         show_message_dialog_mock: Mock,
+        run_pre_gui_hooks_mock: Mock,
     ):
         # GIVEN
         open_job_mock.create_job_bundle = MagicMock(return_value="/path/to/bundle")
