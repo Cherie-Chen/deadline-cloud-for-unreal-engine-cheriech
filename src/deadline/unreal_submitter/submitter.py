@@ -309,6 +309,19 @@ class UnrealSubmitter:
 
         unreal.EditorDialog.show_message(title=title, message=message, message_type=message_type)
 
+    def _pre_gui_hook_confirm_callback(self):
+        """Choose the confirmation callback for pre-GUI hooks based on the auto_accept setting.
+
+        Returns ``None`` (run hooks without prompting) when ``settings.auto_accept`` is enabled,
+        otherwise the Unreal-native confirmation dialog :meth:`_unreal_hook_confirmation`. Kept as
+        a small helper so the auto_accept branch can be unit-tested headlessly.
+
+        :return: The ``confirm_callback`` to pass to ``run_pre_gui_hooks``, or ``None``.
+        """
+        if str2bool(get_setting("settings.auto_accept")):
+            return None
+        return self._unreal_hook_confirmation
+
     def _unreal_hook_confirmation(self, sources: list) -> bool:
         """Show the standard "these hooks will run" confirmation in the Unreal Editor UI.
 
@@ -363,16 +376,12 @@ class UnrealSubmitter:
         # Imported lazily (not at module top): the pre_gui_hooks module ships in deadline-cloud
         # 0.60.1+, and a top-level import would break importing this module — and every unit test
         # that collects it — against older deadline-cloud releases.
-        from deadline.client.ui.pre_gui_hooks import (  # pylint: disable=import-error
+        from deadline.client.ui.pre_gui_hooks import (
             PreGuiHookContext,
             run_pre_gui_hooks,
         )
 
-        confirm_callback = (
-            None
-            if str2bool(get_setting("settings.auto_accept"))
-            else self._unreal_hook_confirmation
-        )
+        confirm_callback = self._pre_gui_hook_confirm_callback()
 
         for i, job in enumerate(self._jobs):
             pre_gui_output = run_pre_gui_hooks(

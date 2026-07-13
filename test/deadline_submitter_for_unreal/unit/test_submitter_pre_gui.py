@@ -127,6 +127,32 @@ class TestRunPreGuiHooks:
 
 
 @patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")
+class TestPreGuiHookConfirmCallback:
+    """The auto_accept branch of the confirm-callback selection, tested headlessly."""
+
+    @patch("deadline.unreal_submitter.submitter.get_setting", return_value="true")
+    @patch("deadline.unreal_submitter.submitter.str2bool", return_value=True)
+    def test_confirm_callback_none_when_auto_accept_enabled(
+        self, _str2bool: Mock, mock_get_setting: Mock, _telemetry: Mock
+    ):
+        """With settings.auto_accept enabled, hooks run without a confirmation prompt."""
+        submitter = UnrealSubmitter()
+
+        assert submitter._pre_gui_hook_confirm_callback() is None
+        mock_get_setting.assert_called_once_with("settings.auto_accept")
+
+    @patch("deadline.unreal_submitter.submitter.get_setting", return_value="false")
+    @patch("deadline.unreal_submitter.submitter.str2bool", return_value=False)
+    def test_confirm_callback_prompts_when_auto_accept_disabled(
+        self, _str2bool: Mock, _get_setting: Mock, _telemetry: Mock
+    ):
+        """With settings.auto_accept disabled, the Unreal-native confirmation callback is used."""
+        submitter = UnrealSubmitter()
+
+        assert submitter._pre_gui_hook_confirm_callback() == submitter._unreal_hook_confirmation
+
+
+@patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")
 class TestUnrealHookConfirmation:
     def test_silent_mode_auto_proceeds(self, _telemetry: Mock):
         """In silent mode there is no UI to prompt in, so confirmation proceeds without asking."""

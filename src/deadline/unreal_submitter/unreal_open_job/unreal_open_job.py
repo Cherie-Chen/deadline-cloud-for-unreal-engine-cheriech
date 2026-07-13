@@ -345,7 +345,7 @@ class UnrealOpenJob(UnrealOpenJobEntity):
         # Imported lazily (not at module top): the pre_gui_hooks module ships in deadline-cloud
         # 0.60.1+, and a top-level import would break importing this module — and every unit test
         # that collects it — against older deadline-cloud releases.
-        from deadline.client.ui.pre_gui_hooks import (  # pylint: disable=import-error
+        from deadline.client.ui.pre_gui_hooks import (
             apply_pre_gui_output as _apply_pre_gui_output,
         )
 
