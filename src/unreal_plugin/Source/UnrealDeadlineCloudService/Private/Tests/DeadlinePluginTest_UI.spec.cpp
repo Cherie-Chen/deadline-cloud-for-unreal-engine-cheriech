@@ -1288,6 +1288,11 @@ void FDeadlinePluginUISpec::Define()
 					};
 
 				ScrollToElement(Driver, List.ToSharedRef(), ScrollBar.ToSharedRef(), CustomAmountNameWidget, 50);
+				// Give the details view a moment to finalize its layout after scrolling so the
+				// widget's on-screen geometry matches what the AutomationDriver will hit-test.
+				// Without this, the subsequent click can land just outside the target widget and
+				// fail with "Element found but not located under the cursor".
+				Driver->Wait(FTimespan::FromSeconds(0.5f));
 				bool bCustomAmountNameWidgetExists = CustomAmountNameWidget->Exists();
 				TestTrue("CustomAmountNameWidget widget should exist", bCustomAmountNameWidgetExists);
 
@@ -1301,17 +1306,29 @@ void FDeadlinePluginUISpec::Define()
 					else
 					{
 						FString OldValue = *AmountKey;
+						// Explicitly focus and click the widget before typing. The AutomationDriver
+						// requires the widget's geometry to be under the cursor for TypeChord/Type
+						// to succeed; a bare InputText() has been observed to fail near the viewport
+						// edge (custom rows appear after several predefined amounts) with
+						// "Element found but not located under the cursor".
+						CustomAmountNameWidget->Focus();
+						CustomAmountNameWidget->Click(EMouseButtons::Type::Left);
+						CustomAmountNameWidget->Type(EKeys::Left);
 						InputText(CustomAmountNameWidget, "InvalidNameTest", true);
 						TestTrue("New key should not exist", FindStringKeyRef(CreatedHostRequirements->HostRequirements.Amounts, "amount.test") != nullptr);
 
+						CustomAmountNameWidget->Focus();
+						CustomAmountNameWidget->Click(EMouseButtons::Type::Left);
+						CustomAmountNameWidget->Type(EKeys::Left);
 						InputText(CustomAmountNameWidget, "amount.custom", true);
 						TestTrue("New key should exist", FindStringKeyRef(CreatedHostRequirements->HostRequirements.Amounts, "amount.custom") != nullptr);
 					}
 				}
 
 				ScrollToElement(Driver, List.ToSharedRef(), ScrollBar.ToSharedRef(), CustomAttrNameWidget, 50);
+				Driver->Wait(FTimespan::FromSeconds(0.5f));
 				bool bCustomAttrNameWidgetExists = CustomAttrNameWidget->Exists();
-				TestTrue("CustomAmountNameWidget widget should exist", bCustomAttrNameWidgetExists);
+				TestTrue("CustomAttrNameWidget widget should exist", bCustomAttrNameWidgetExists);
 
 				if (bCustomAttrNameWidgetExists)
 				{
@@ -1323,9 +1340,16 @@ void FDeadlinePluginUISpec::Define()
 					else
 					{
 						FString OldValue = *AttrKey;
+						// See rationale on the Amount widget above.
+						CustomAttrNameWidget->Focus();
+						CustomAttrNameWidget->Click(EMouseButtons::Type::Left);
+						CustomAttrNameWidget->Type(EKeys::Left);
 						InputText(CustomAttrNameWidget, "InvalidNameTest", true);
 						TestTrue("New key should not exist", FindStringKeyRef(CreatedHostRequirements->HostRequirements.Attributes, "attr.test") != nullptr);
 
+						CustomAttrNameWidget->Focus();
+						CustomAttrNameWidget->Click(EMouseButtons::Type::Left);
+						CustomAttrNameWidget->Type(EKeys::Left);
 						InputText(CustomAttrNameWidget, "attr.custom", true);
 						TestTrue("New key should exist", FindStringKeyRef(CreatedHostRequirements->HostRequirements.Attributes, "attr.custom") != nullptr);
 					}
