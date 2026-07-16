@@ -1771,6 +1771,12 @@ def deadline_worker_agent(
 
     This fixture is session-scoped and ensures the worker agent is stopped during cleanup.
 
+    The agent state is persisted to a stable per-host directory that survives across runs, so
+    on a reused EC2 instance the agent loads its previously registered workerId and reuses it
+    (the UpdateWorker path) instead of calling CreateWorker again. Re-registering would fail
+    with a ConflictException ("A worker has already been created for this EC2 instance"), because
+    the Deadline service permits only one worker per EC2 instance.
+
     Args:
         request: The pytest request object (used to read the --ueversion option)
         reusable_farm_id: The farm ID to use
@@ -1784,6 +1790,39 @@ def deadline_worker_agent(
     import os
     import datetime
     import shutil
+
+    def _stop_process() -> None:
+        """Terminate the worker-agent subprocess if it is still running."""
+        if process is None or process.poll() is not None:
+            return
+        logger.info(f"Stopping deadline-worker-agent (PID: {process.pid})")
+        try:
+            if sys.platform == "win32":
+                # On Windows, send Ctrl+C to the process group
+                process.send_signal(signal.CTRL_C_EVENT)
+                # Give it some time to shut down gracefully
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # Force kill if it doesn't respond to Ctrl+C
+                    process.terminate()
+            else:
+                # On Unix, try SIGTERM for graceful shutdown first
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # If it doesn't respond to SIGTERM, try SIGINT (Ctrl+C equivalent)
+                    logger.warning("Process didn't respond to SIGTERM, sending SIGINT")
+                    process.send_signal(signal.SIGINT)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # As a last resort, use SIGKILL
+                        logger.warning("Process didn't respond to SIGINT, using SIGKILL")
+                        process.kill()
+        except Exception as e:
+            logger.error(f"Error stopping worker agent: {str(e)}")
 
     # Check if deadline-worker-agent is available using 'where' or 'which'
     agent_path = None
@@ -1828,9 +1867,32 @@ def deadline_worker_agent(
         log_dir, f"worker-agent-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
     )
 
-    # Create persistence dir for worker agent state
-    persistence_dir = os.path.join(os.getcwd(), "worker-agent-state")
+    # Persist worker-agent state in a stable per-host location that survives
+    # across runs. It MUST NOT live under the ephemeral test workspace / cwd
+    # (which CI wipes between runs); otherwise the agent cannot find its
+    # previously registered workerId, falls back to CreateWorker, and fails
+    # with a ConflictException on a reused EC2 instance.
+    #
+    # We do NOT use the worker-agent's built-in default (%PROGRAMDATA%\Amazon\
+    # Deadline\Cache on Windows, /var/lib/deadline on POSIX) because those
+    # paths are provisioned by the agent's installer with elevated privileges
+    # and are typically not writable by the pytest user in an ad-hoc test run.
+    #
+    # DEADLINE_E2E_PERSISTENCE_DIR lets CI operators point at a pre-provisioned,
+    # stable, writable path (e.g. one baked into the reserved-fleet AMI with
+    # explicit ACLs). If unset, fall back to a per-user path under $HOME, which
+    # is user-writable everywhere and persists on any CI runner that does not
+    # wipe the user profile between jobs.
+    persistence_dir = os.environ.get(
+        "DEADLINE_E2E_PERSISTENCE_DIR",
+        os.path.join(
+            os.path.expanduser("~"),
+            ".deadline-cloud-for-unreal-engine-e2e",
+            "worker-agent-state",
+        ),
+    )
     os.makedirs(persistence_dir, exist_ok=True)
+    logger.info(f"Worker-agent persistence dir: {persistence_dir}")
 
     # Start the worker agent process
     cmd = [
@@ -1867,89 +1929,68 @@ def deadline_worker_agent(
     logger.info(f"Starting worker agent with command: {' '.join(cmd)}")
     logger.info(f"Worker agent logs will be written to: {log_file}")
 
-    log_fh = open(log_file, "w")
+    process = None
+    log_fh = None
+    try:
+        log_fh = open(log_file, "w")
 
-    # Use different process creation flags based on platform
-    if sys.platform == "win32":
-        process = subprocess.Popen(
-            cmd,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            stdout=log_fh,
-            stderr=log_fh,
-            env=env,
-            text=True,
-        )
-    else:
-        process = subprocess.Popen(
-            cmd,
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-            stdout=log_fh,
-            stderr=log_fh,
-            env=env,
-            text=True,
-        )
+        # Use different process creation flags based on platform
+        if sys.platform == "win32":
+            process = subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=env,
+                text=True,
+            )
+        else:
+            process = subprocess.Popen(
+                cmd,
+                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=env,
+                text=True,
+            )
 
-    # Give the worker agent time to start and register with the fleet
-    for i in range(6):
-        time.sleep(5)
+        # Give the worker agent time to start and register with the fleet
+        for i in range(6):
+            time.sleep(5)
+            if process.poll() is not None:
+                log_fh.flush()
+                with open(log_file, "r") as f:
+                    log_content = f.read()
+                pytest.fail(
+                    f"Worker agent exited during startup (exit code {process.returncode}):\n{log_content}"
+                )
+            logger.info(f"Worker agent startup check {i+1}/6 — still running (PID {process.pid})")
+
+        # Final check
         if process.poll() is not None:
             log_fh.flush()
             with open(log_file, "r") as f:
                 log_content = f.read()
             pytest.fail(
-                f"Worker agent exited during startup (exit code {process.returncode}):\n{log_content}"
+                f"Worker agent failed to start: exit code {process.returncode}\n{log_content}"
             )
-        logger.info(f"Worker agent startup check {i+1}/6 — still running (PID {process.pid})")
 
-    # Final check
-    if process.poll() is not None:
-        log_fh.flush()
-        with open(log_file, "r") as f:
-            log_content = f.read()
-        pytest.fail(f"Worker agent failed to start: exit code {process.returncode}\n{log_content}")
+        logger.info(f"Worker agent started successfully with PID: {process.pid}")
+        logger.info(f"To view worker agent logs, check: {log_file}")
 
-    logger.info(f"Worker agent started successfully with PID: {process.pid}")
-    logger.info(f"To view worker agent logs, check: {log_file}")
-
-    # Return the process and log file to the test
-    yield process, log_file
-
-    # Cleanup: terminate the worker agent process
-    logger.info(f"Stopping deadline-worker-agent (PID: {process.pid})")
-
-    try:
-        if sys.platform == "win32":
-            # On Windows, send Ctrl+C to the process group
-            process.send_signal(signal.CTRL_C_EVENT)
-            # Give it some time to shut down gracefully
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                # Force kill if it doesn't respond to Ctrl+C
-                process.terminate()
-        else:
-            # On Unix, use a more secure approach
-            # First try SIGTERM for graceful shutdown
-            process.send_signal(signal.SIGTERM)
-            # Give it some time to shut down gracefully
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                # If it doesn't respond to SIGTERM, try SIGINT (Ctrl+C equivalent)
-                logger.warning("Process didn't respond to SIGTERM, sending SIGINT")
-                process.send_signal(signal.SIGINT)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # As a last resort, use SIGKILL
-                    logger.warning("Process didn't respond to SIGINT, using SIGKILL")
-                    process.kill()
-    except Exception as e:
-        logger.error(f"Error stopping worker agent: {str(e)}")
+        # Return the process and log file to the test
+        yield process, log_file
     finally:
-        log_fh.close()
-
-    logger.info("Worker agent stopped")
+        # Single teardown site covering both the startup-failure path
+        # (pytest.fail raises before the yield) and normal teardown after the
+        # yield, so the two cannot drift. _stop_process() is a no-op if the
+        # agent never started or already exited. The worker registration is
+        # intentionally left in place so the next run on this host reuses the
+        # persisted workerId instead of re-creating it.
+        _stop_process()
+        if log_fh is not None:
+            log_fh.close()
+        logger.info("Worker agent stopped")
 
 
 @pytest.fixture(scope="session")
