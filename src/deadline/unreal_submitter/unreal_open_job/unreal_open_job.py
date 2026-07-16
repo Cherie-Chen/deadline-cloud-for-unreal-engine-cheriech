@@ -313,6 +313,19 @@ class UnrealOpenJob(UnrealOpenJobEntity):
             param["value"] = job_parameter_value
         return job_parameter_values
 
+    def _submitter_managed_parameter_names(self) -> set[str]:
+        """Template-parameter names the submitter computes itself at bundle-build time.
+
+        A pre-GUI hook must not override these — see :meth:`apply_pre_gui_output`. The base Job
+        computes none; :class:`RenderUnrealOpenJob` overrides this to protect the project path,
+        marketplace plugins dir, extra command-line args, and Perforce/UGS parameters it resolves
+        for the target machine.
+
+        :return: Set of submitter-managed parameter names (empty on the base Job).
+        :rtype: set[str]
+        """
+        return set()
+
     def apply_pre_gui_output(self, pre_gui_output: dict[str, Any]) -> None:
         """Apply merged pre-GUI hook output onto this Job.
 
@@ -331,6 +344,11 @@ class UnrealOpenJob(UnrealOpenJobEntity):
         * ``parameters`` named ``deadline:priority`` / ``deadline:maxFailedTasksCount`` /
           ``deadline:maxRetriesPerTask`` / ``deadline:targetTaskRunStatus`` update the Job's
           shared settings.
+        * ``parameters`` naming a submitter-managed value (project path, marketplace plugins
+          dir, extra command-line args, Perforce/UGS paths — see
+          :meth:`_submitter_managed_parameter_names`) are ignored and logged: the submitter
+          resolves these for the target machine at submission time, so a hook override would
+          silently break the render.
         * Any other parameter has no home on an Unreal Job (there is no submission dialog to hold
           arbitrary queue parameters) and is logged and skipped.
 
@@ -350,6 +368,24 @@ class UnrealOpenJob(UnrealOpenJobEntity):
             apply_pre_gui_output as _apply_pre_gui_output,
         )
 
+        # Parameters the submitter computes itself for the target machine (project path,
+        # marketplace plugins dir, Perforce/UGS paths, extra cmd args). A pre-GUI hook must not
+        # override these: RenderUnrealOpenJob._build_parameter_values only fills them when their
+        # value is still None, so a hook-supplied value would land in the "already filled"
+        # partition and silently suppress the submitter's machine-correct value, breaking the
+        # render. Passing them as cli_provided_param_names makes the routing helper skip them
+        # (the same precedence a CLI --parameter value gets over a hook value).
+        managed_names = self._submitter_managed_parameter_names()
+        overridden = sorted(
+            name for name in pre_gui_output.get("parameters", {}) if name in managed_names
+        )
+        if overridden:
+            logger.warning(
+                "Pre-GUI hook parameter(s) %s are managed by the submitter and were ignored "
+                "(the submitter resolves these for the target machine at submission time).",
+                ", ".join(overridden),
+            )
+
         # Adapt this Job to the shape the generic helper expects (assignable name/description +
         # a parameters list of {"name", "value"} dicts). Routing template-parameter values in
         # place lets the helper decide, per name, whether a hook value targets a Job parameter
@@ -361,7 +397,12 @@ class UnrealOpenJob(UnrealOpenJobEntity):
         )
         shared_parameter_values: dict[str, Any] = {}
 
-        _apply_pre_gui_output(pre_gui_output, settings, shared_parameter_values)
+        _apply_pre_gui_output(
+            pre_gui_output,
+            settings,
+            shared_parameter_values,
+            cli_provided_param_names=managed_names,
+        )
 
         # Write name / description back (name has no public setter on UnrealOpenJob).
         self._name = settings.name
@@ -1261,6 +1302,43 @@ class RenderUnrealOpenJob(UnrealOpenJob):
         self._asset_references.input_filenames.add(job_dependencies_descriptor)
 
         return parameter_values
+
+    def _submitter_managed_parameter_names(self) -> set[str]:
+        """Template parameters :meth:`_build_parameter_values` resolves for the target machine.
+
+        These are filled by the submitter only when their value is still ``None`` (the "unfilled"
+        partition), so a pre-GUI hook that sets one would push it into the "already filled"
+        partition and silently suppress the submitter's computed value. They are therefore
+        excluded from what a hook may route onto template parameters (see
+        :meth:`UnrealOpenJob.apply_pre_gui_output`). The Perforce/UGS names are only computed under
+        their respective transfer strategy, which is fixed at construction time.
+
+        :return: Set of submitter-managed parameter names for this Job.
+        :rtype: set[str]
+        """
+        names = {
+            OpenJobParameterNames.UNREAL_PROJECT_PATH,
+            OpenJobParameterNames.MARKETPLACE_PLUGINS_DIR,
+            OpenJobParameterNames.UNREAL_EXTRA_CMD_ARGS,
+            OpenJobParameterNames.UNREAL_EXTRA_CMD_ARGS_FILE,
+        }
+        if self._transfer_files_strategy == TransferProjectFilesStrategy.UGS:
+            names |= {
+                OpenJobParameterNames.PERFORCE_STREAM_PATH,
+                OpenJobParameterNames.PERFORCE_CHANGELIST_NUMBER,
+                OpenJobParameterNames.UNREAL_PROJECT_NAME,
+                OpenJobParameterNames.UNREAL_PROJECT_RELATIVE_PATH,
+                OpenJobParameterNames.UNREAL_EXECUTABLE_RELATIVE_PATH,
+            }
+        elif self._transfer_files_strategy == TransferProjectFilesStrategy.P4:
+            names |= {
+                OpenJobParameterNames.PERFORCE_CHANGELIST_NUMBER,
+                OpenJobParameterNames.UNREAL_PROJECT_NAME,
+                OpenJobParameterNames.UNREAL_PROJECT_RELATIVE_PATH,
+                OpenJobParameterNames.PERFORCE_WORKSPACE_SPECIFICATION_TEMPLATE,
+                OpenJobParameterNames.UNREAL_MRQ_JOB_DEPENDENCIES_DESCRIPTOR,
+            }
+        return names
 
     def _build_parameter_values(self) -> list:
         """

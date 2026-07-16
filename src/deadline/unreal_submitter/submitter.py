@@ -333,25 +333,10 @@ class UnrealSubmitter:
         :return: Whether the user accepted running the hooks.
         :rtype: bool
         """
-        from deadline.client.job_bundle._hooks import _generate_hooks_confirmation_message
-
         if self._silent_mode:
             return True
 
-        # Pass source_label so an environment-configured hook source (DEADLINE_HOOKS_DIR) is not
-        # shown to the user as if it came from the job bundle — this prompt is the user's
-        # informed-consent point for running arbitrary code. Mirrors deadline-cloud's
-        # qt_hook_confirmation.
-        confirmation_msg = (
-            "".join(
-                _generate_hooks_confirmation_message(
-                    m.hooks, m._original_bundle_dir, m.source_label
-                )
-                for m in sources
-                if m.hooks
-            )
-            + "Do you want to run these hooks?"
-        )
+        confirmation_msg = self._build_hook_confirmation_message(sources)
         reply = unreal.EditorDialog.show_message(
             "Job Submission Confirmation",
             confirmation_msg,
@@ -359,6 +344,55 @@ class UnrealSubmitter:
             unreal.AppReturnType.NO,
         )
         return reply == unreal.AppReturnType.YES
+
+    @staticmethod
+    def _build_hook_confirmation_message(sources: list) -> str:
+        """Build the confirmation-prompt body that lists the pre-GUI hooks that will run.
+
+        The detailed listing is produced by deadline-cloud's *private*
+        ``_generate_hooks_confirmation_message`` and the private ``HookManager`` attributes
+        ``_original_bundle_dir`` / ``source_label`` — none of which are public API, and any of
+        which may be renamed or removed within the declared ``deadline >=0.60.1,<0.61`` range.
+        Since ``_run_pre_gui_hooks`` only catches :class:`DeadlineOperationCanceled`, an
+        ``ImportError``/``AttributeError`` raised here would otherwise bubble up as a generic
+        "Submission failed" (via ``@error_notify``) with no actionable signal. We therefore guard
+        the private access and, if it breaks, fall back to a generic prompt that still asks for
+        the user's informed consent to run the hooks (never silently skipping the prompt — this
+        is the point at which the user consents to running arbitrary code).
+
+        :param sources: List of ``HookManager`` sources whose pre-GUI hooks will run.
+        :return: The confirmation-prompt body text.
+        :rtype: str
+        """
+        try:
+            from deadline.client.job_bundle._hooks import _generate_hooks_confirmation_message
+
+            # Pass source_label so an environment-configured hook source (DEADLINE_HOOKS_DIR) is
+            # not shown to the user as if it came from the job bundle — this prompt is the user's
+            # informed-consent point for running arbitrary code. Mirrors deadline-cloud's
+            # qt_hook_confirmation.
+            return (
+                "".join(
+                    _generate_hooks_confirmation_message(
+                        m.hooks, m._original_bundle_dir, m.source_label
+                    )
+                    for m in sources
+                    if m.hooks
+                )
+                + "Do you want to run these hooks?"
+            )
+        except (ImportError, AttributeError):
+            logger.warning(
+                "Could not build the detailed pre-GUI hook confirmation message from "
+                "deadline-cloud internals (private API may have changed); falling back to a "
+                "generic confirmation prompt.",
+                exc_info=True,
+            )
+            return (
+                f"{len(sources)} pre-GUI submission hook source(s) configured via "
+                "DEADLINE_HOOKS_DIR will run to pre-populate job fields. Hooks run arbitrary "
+                "code.\nDo you want to run these hooks?"
+            )
 
     def _run_pre_gui_hooks(self) -> None:
         """Run pre-GUI submission hooks for every queued Job and apply their output.
@@ -383,12 +417,30 @@ class UnrealSubmitter:
 
         confirm_callback = self._pre_gui_hook_confirm_callback()
 
+        # Farm / queue / storage-profile are submission-wide and read from the active config — the
+        # same settings the standalone submitter and the C++ plugin (DeadlineCloudDeveloperSettings)
+        # use. run_pre_gui_hooks falls back to these same settings when the context leaves them
+        # None, but we pass them explicitly so a hook that branches on them sees the resolved
+        # submission context. Empty settings collapse to None so the library applies its own
+        # normalization.
+        farm_id = get_setting("defaults.farm_id") or None
+        queue_id = get_setting("defaults.queue_id") or None
+        storage_profile_id = get_setting("settings.storage_profile_id") or None
+
         for i, job in enumerate(self._jobs):
             pre_gui_output = run_pre_gui_hooks(
                 PreGuiHookContext(
                     bundle_dir=None,
                     job_name=job.name,
                     submitter_name="unreal",
+                    # Priority can differ per Job (it comes from the Job's shared settings);
+                    # farm/queue/storage are submission-wide. Without these, a hook reading
+                    # context.priority sees the type default (50) and context.queue_id/farm_id
+                    # are None, so hooks that gate on them would silently misbehave.
+                    priority=job.job_shared_settings.get_priority(),
+                    farm_id=farm_id,
+                    queue_id=queue_id,
+                    storage_profile_id=storage_profile_id,
                 ),
                 # Only prompt for the first Job; the env-sourced hooks are identical across the
                 # queue, so re-prompting per Job would be redundant. Later Jobs run without a

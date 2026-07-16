@@ -50,10 +50,11 @@ def _stub_pre_gui_hooks(run_mock: Mock):
     return {"deadline.client.ui.pre_gui_hooks": stub}
 
 
-def _make_job(name: str = "JobA") -> Mock:
+def _make_job(name: str = "JobA", priority: int = 50) -> Mock:
     job = Mock()
     job.name = name
     job.apply_pre_gui_output = MagicMock()
+    job.job_shared_settings.get_priority.return_value = priority
     return job
 
 
@@ -79,6 +80,77 @@ class TestRunPreGuiHooks:
         assert context.submitter_name == "unreal"
         assert context.job_name == "JobA"
         job.apply_pre_gui_output.assert_called_once_with({"name": "hooked"})
+
+    @patch("deadline.unreal_submitter.submitter.str2bool", return_value=False)
+    @patch("deadline.unreal_submitter.submitter.get_setting")
+    def test_submission_context_populated(
+        self, mock_get_setting: Mock, _str2bool: Mock, _telemetry: Mock
+    ):
+        """priority (per-Job) and farm/queue/storage-profile (from config) reach the context.
+
+        Regression test: without these, a hook reading context.priority saw the type default (50)
+        and context.farm_id/queue_id/storage_profile_id were None, so context-aware hooks (e.g.
+        gating on target queue or priority) silently misbehaved.
+        """
+        settings_map = {
+            "settings.auto_accept": "false",
+            "defaults.farm_id": "farm-123",
+            "defaults.queue_id": "queue-456",
+            "settings.storage_profile_id": "sp-789",
+        }
+        mock_get_setting.side_effect = lambda key: settings_map.get(key, "")
+        run_mock = MagicMock(return_value={})
+        submitter = UnrealSubmitter()
+        submitter._jobs.append(_make_job("JobA", priority=75))
+
+        with patch.dict(sys.modules, _stub_pre_gui_hooks(run_mock)):
+            submitter._run_pre_gui_hooks()
+
+        context = run_mock.call_args.args[0]
+        assert context.priority == 75
+        assert context.farm_id == "farm-123"
+        assert context.queue_id == "queue-456"
+        assert context.storage_profile_id == "sp-789"
+
+    @patch("deadline.unreal_submitter.submitter.str2bool", return_value=False)
+    @patch("deadline.unreal_submitter.submitter.get_setting")
+    def test_per_job_priority_forwarded(
+        self, mock_get_setting: Mock, _str2bool: Mock, _telemetry: Mock
+    ):
+        """Each Job's own priority is forwarded (priority can differ across the queue)."""
+        mock_get_setting.side_effect = lambda key: "" if key != "settings.auto_accept" else "false"
+        run_mock = MagicMock(return_value={})
+        submitter = UnrealSubmitter()
+        submitter._jobs.extend([_make_job("A", priority=10), _make_job("B", priority=90)])
+
+        with patch.dict(sys.modules, _stub_pre_gui_hooks(run_mock)):
+            submitter._run_pre_gui_hooks()
+
+        priorities = [c.args[0].priority for c in run_mock.call_args_list]
+        assert priorities == [10, 90]
+
+    @patch("deadline.unreal_submitter.submitter.get_setting", return_value="false")
+    @patch("deadline.unreal_submitter.submitter.str2bool", return_value=False)
+    def test_empty_farm_queue_settings_collapse_to_none(
+        self, _str2bool: Mock, _get_setting: Mock, _telemetry: Mock
+    ):
+        """Empty config settings collapse to None so run_pre_gui_hooks applies its own defaults."""
+        run_mock = MagicMock(return_value={})
+        submitter = UnrealSubmitter()
+        submitter._jobs.append(_make_job())
+
+        # get_setting returns "false" for everything here; the storage-profile "or None" path is
+        # exercised directly below with an empty return.
+        with (
+            patch("deadline.unreal_submitter.submitter.get_setting", return_value=""),
+            patch.dict(sys.modules, _stub_pre_gui_hooks(run_mock)),
+        ):
+            submitter._run_pre_gui_hooks()
+
+        context = run_mock.call_args.args[0]
+        assert context.farm_id is None
+        assert context.queue_id is None
+        assert context.storage_profile_id is None
 
     @patch("deadline.unreal_submitter.submitter.get_setting", return_value="true")
     @patch("deadline.unreal_submitter.submitter.str2bool", return_value=True)
@@ -189,6 +261,35 @@ class TestUnrealHookConfirmation:
         submitter_unreal.EditorDialog.show_message.return_value = submitter_unreal.AppReturnType.NO
 
         assert submitter._unreal_hook_confirmation([source]) is False
+
+    @patch("deadline.unreal_submitter.submitter.logger")
+    @patch("deadline.client.job_bundle._hooks._generate_hooks_confirmation_message")
+    @patch("deadline.unreal_submitter.submitter.unreal")
+    def test_falls_back_to_generic_prompt_on_private_api_break(
+        self, submitter_unreal: Mock, gen_msg: Mock, mock_logger: Mock, _telemetry: Mock
+    ):
+        """If deadline-cloud's private confirmation internals change, degrade to a generic prompt.
+
+        Regression test: the detailed message relies on the private
+        ``_generate_hooks_confirmation_message`` and private ``HookManager`` attributes, which can
+        change within ``deadline >=0.60.1,<0.61``. A break there must NOT hard-fail submission
+        (``_run_pre_gui_hooks`` only catches ``DeadlineOperationCanceled``); we still prompt for
+        consent with a generic message and log the breakage.
+        """
+        gen_msg.side_effect = AttributeError("HookManager._original_bundle_dir renamed")
+        submitter = UnrealSubmitter(silent_mode=False)
+        source = MagicMock()
+        source.hooks = ["hook.py"]
+        submitter_unreal.EditorDialog.show_message.return_value = submitter_unreal.AppReturnType.YES
+
+        result = submitter._unreal_hook_confirmation([source])
+
+        # A dialog was still shown (the user still consents) and the break was logged, not raised.
+        assert result is True
+        submitter_unreal.EditorDialog.show_message.assert_called_once()
+        mock_logger.warning.assert_called_once()
+        prompt = submitter_unreal.EditorDialog.show_message.call_args.args[1]
+        assert "run these hooks" in prompt.lower()
 
 
 @patch("deadline.unreal_submitter.submitter.get_deadline_cloud_library_telemetry_client")

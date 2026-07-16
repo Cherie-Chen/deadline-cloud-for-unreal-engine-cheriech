@@ -27,7 +27,10 @@ sys.modules["unreal"] = unreal_mock
 
 from deadline.unreal_submitter.unreal_open_job.unreal_open_job import (  # noqa: E402
     UnrealOpenJob,
+    RenderUnrealOpenJob,
+    UgsUnrealOpenJobEnvironment,
     UnrealOpenJobParameterDefinition,
+    TransferProjectFilesStrategy,
 )
 
 _TEMPLATE_PATCH = (
@@ -167,6 +170,96 @@ class TestApplyPreGuiOutput:
         assert param_c is not None and param_c.value == 42
         shared = {p["name"]: p["value"] for p in job.job_shared_settings.serialize()}
         assert shared["deadline:maxRetriesPerTask"] == 5
+
+    def test_submitter_managed_parameter_not_clobbered(self):
+        """A hook cannot override a submitter-managed template parameter; it's skipped + warned.
+
+        Regression test for the ProjectFilePath / MarketplacePluginsDir clobber: the submitter
+        computes those params only while their value is still ``None``, so letting a hook fill one
+        would push it into the "already filled" partition and silently suppress the submitter's
+        machine-correct value. ``apply_pre_gui_output`` must exclude the submitter-managed names
+        (via ``cli_provided_param_names``) and warn the user.
+        """
+        job = _make_job()
+        param_b_before = job._find_extra_parameter("ParamB", "STRING")
+        assert param_b_before is not None
+        original_value = param_b_before.value
+
+        # Pretend the submitter manages ParamB (a real template parameter in the fixture).
+        with (
+            patch.object(job, "_submitter_managed_parameter_names", return_value={"ParamB"}),
+            patch(
+                "deadline.unreal_submitter.unreal_open_job.unreal_open_job.logger"
+            ) as logger_mock,
+        ):
+            job.apply_pre_gui_output({"parameters": {"ParamB": "from-hook"}})
+
+        # The managed parameter keeps its original value; the hook value is ignored.
+        param_b_after = job._find_extra_parameter("ParamB", "STRING")
+        assert param_b_after is not None
+        assert param_b_after.value == original_value
+        assert param_b_after.value != "from-hook"
+        # The user is warned that the hook value was ignored (single "managed" warning, and no
+        # "unmatched" warning since the managed param never falls through to shared values).
+        logger_mock.warning.assert_called_once()
+        assert "ParamB" in logger_mock.warning.call_args.args[1]
+
+
+@patch.dict(sys.modules, {"deadline.client.ui.pre_gui_hooks": _pre_gui_hooks_stub()}, clear=False)
+class TestSubmitterManagedParameterNames:
+    """The set of parameters a pre-GUI hook must not override (submitter-computed values)."""
+
+    def test_base_job_manages_nothing(self):
+        """The base Job computes no parameters, so a hook may route onto any of them."""
+        assert _make_job()._submitter_managed_parameter_names() == set()
+
+    def test_render_job_manages_computed_params_under_s3(self):
+        """Under the default S3 strategy, project path / marketplace dir / cmd args are protected."""
+        with patch(_TEMPLATE_PATCH, return_value=fixtures.f_job_template_default()):
+            render_job = RenderUnrealOpenJob(file_path="", name="JobA")
+
+        names = render_job._submitter_managed_parameter_names()
+        assert {
+            "ProjectFilePath",
+            "MarketplacePluginsDir",
+            "ExtraCmdArgs",
+            "ExtraCmdArgsFile",
+        } <= names
+        # No Perforce params are computed under S3.
+        assert "PerforceStreamPath" not in names
+        assert "PerforceWorkspaceSpecificationTemplate" not in names
+
+    def test_render_job_manages_perforce_params_under_ugs(self):
+        """Under the UGS strategy, the Perforce/UGS params the submitter computes are protected."""
+        with patch(_TEMPLATE_PATCH, return_value=fixtures.f_job_template_default()):
+            render_job = RenderUnrealOpenJob(
+                file_path="", name="JobA", environments=[UgsUnrealOpenJobEnvironment("")]
+            )
+        assert render_job._transfer_files_strategy == TransferProjectFilesStrategy.UGS
+
+        names = render_job._submitter_managed_parameter_names()
+        assert {
+            "PerforceStreamPath",
+            "PerforceChangelistNumber",
+            "ProjectName",
+            "ProjectRelativePath",
+            "ExecutableRelativePath",
+        } <= names
+
+    def test_render_job_manages_perforce_params_under_p4(self):
+        """Under the P4 strategy, the P4 workspace/dependency params are protected."""
+        with patch(_TEMPLATE_PATCH, return_value=fixtures.f_job_template_default()):
+            render_job = RenderUnrealOpenJob(file_path="", name="JobA")
+        render_job._transfer_files_strategy = TransferProjectFilesStrategy.P4
+
+        names = render_job._submitter_managed_parameter_names()
+        assert {
+            "PerforceChangelistNumber",
+            "ProjectName",
+            "ProjectRelativePath",
+            "PerforceWorkspaceSpecificationTemplate",
+            "MrqJobDependenciesDescriptor",
+        } <= names
 
 
 @patch.dict(sys.modules, {"deadline.client.ui.pre_gui_hooks": _pre_gui_hooks_stub()}, clear=False)
