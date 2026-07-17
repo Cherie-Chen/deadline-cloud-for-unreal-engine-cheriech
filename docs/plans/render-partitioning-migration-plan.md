@@ -25,9 +25,9 @@ independently (run_data keys are their contract), we use an **expand/contract
 ## Compatibility model
 
 - Submitter writes run_data keys; adaptor reads them. Key names are the contract.
-- **SMF:** adaptor version pinned by `CondaPackages` in the job template
-  (`unrealengine-openjd=0.6.*`). The glob continues to match the next
-  0.6.x patch automatically.
+- **SMF:** adaptor version pinned by `CondaPackages` in the job template.
+  Default is moving from `unrealengine-openjd=0.6.*` to `0.7.*` as part of
+  Phase 2's rollout; the glob matches the latest patch automatically.
 - **CMF:** adaptor pip-installed manually, must be kept version-matched to the
   submitter (per `setup-cmf-worker.md`).
 - run_data fields are optional in `run_data.schema.json` (only `handler` is
@@ -48,14 +48,14 @@ independently (run_data keys are their contract), we use an **expand/contract
   0.6.10+). ✅ met. After this, any deployed adaptor handles both old and new
   templates.
 
-### Phase 2 — Submitter switches to new names 🚧 this change
+### Phase 2 — Submitter switches to new names ✅ merged (#338, 0.7.0)
 
 - Rename on submitter side: `OpenJobStepParameterNames`, bundled templates,
   sample scripts, user docs.
-- **No `CondaPackages` pin bump.** The existing `unrealengine-openjd=0.6.*`
-  glob already matches 0.6.10 (Phase 1) as the latest 0.6.x, so SMF
-  workers install a Phase-1+ adaptor on the next job execution without an
-  explicit pin change.
+- **`CondaPackages` pin bump.** 0.7.0 is now deployed everywhere (Gamma and
+  Prod). The default `CondaPackages` pin bump `unrealengine-openjd=0.6.*` →
+  `0.7.*` in the render job templates is prepared and under review
+  ([#343](https://github.com/aws-deadline/deadline-cloud-for-unreal-engine/pull/343)).
 - **Release:** breaking (`refactor!` + `BREAKING CHANGE:` footer), minor bump
   (0.6 → 0.7).
 - **Precondition:** Phase 1 (0.6.10) deployed to the entire fleet. ✅ met.
@@ -64,16 +64,47 @@ independently (run_data keys are their contract), we use an **expand/contract
 - **User migration:** update saved Data Assets, custom templates, and
   submission scripts that reference `ChunkSize`/`ChunkId`; regenerate old job
   bundles. (Find-and-replace details in the Phase-2 PR description.)
+  - Includes internal canary/test job bundles that hand-author OpenJD
+    templates rather than going through the submitter — these are just as
+    exposed to Phase 3 dropping legacy support as any customer template.
+    See `BealineTestJobBundles` CR-290057236 for the Unreal fountain canaries.
 - **Exit criterion:** all submitters in use emit new names.
 
-### Phase 3 — Drop legacy support from the adaptor
+### Phase 3 — Drop legacy support from the adaptor ⏸️ on hold
 
-- Remove `_apply_param_aliases` and the legacy keys from
-  `run_data.schema.json`. Optionally set `additionalProperties: false` so a
-  stale legacy template fails loudly at validation.
+- Remove `_apply_param_aliases` and the legacy `chunk_size`/`chunk_id` keys
+  from `run_data.schema.json`.
+  - Not doing (out of scope for this change): setting
+    `additionalProperties: false`. The schema is currently missing
+    `frames_per_task` (a live, actively-used key emitted by the bundled
+    templates), so locking down `additionalProperties` now would newly
+    reject it. That requires a separate audit of every emitted run_data key
+    before it can be enabled safely.
 - **Release:** breaking (`refactor!` + `BREAKING CHANGE:` footer).
-- **Precondition:** no submitter in use emits legacy names; no old job bundles
-  in flight.
+- **Precondition:** no submitter in use emits legacy names; no old job
+  bundles in flight. ⛔ **not yet met.**
+- **Status: on hold, deliberately not merging yet.** The code change is
+  written and open for review
+  ([branch comparison](https://github.com/aws-deadline/deadline-cloud-for-unreal-engine/compare/mainline...Cherie-Chen:deadline-cloud-for-unreal-engine-cheriech:phase3-drop-legacy-chunk-aliases)),
+  but we are holding the merge even though 0.7.0 is now deployed everywhere.
+  Reasoning: dropping the legacy aliases fails **silently** (a stale
+  template renders the full sequence instead of its partition, with no
+  error) rather than loudly, and we do not yet have confidence that every
+  submitter and job bundle in use — including internal ones we don't
+  directly control the release cadence of, like the CMF-side canaries found
+  in `BealineTestJobBundles` (see CR-290057236) — has actually adopted the
+  new names. Merging Phase 3 before that confidence exists risks silently
+  breaking real users' renders, which is a worse outcome than delaying the
+  cleanup.
+- **What would unblock resuming Phase 3:**
+  - Confirm all internal test/canary bundles across all DCC integrations
+    (not just Unreal) have been audited for hand-authored legacy names, not
+    just the Unreal fountain canaries already found.
+  - A soak period on 0.7.0 with no observed legacy-name usage (e.g. via
+    telemetry/logs on the adaptor side, if available) or an explicit customer
+    communication + waiting period.
+  - Re-review this precondition with the team before merging the prepared
+    branch.
 - **Exit criterion:** rename complete.
 
 ### Phase 4 — Adopt OpenJD native chunking (separate feature track)
@@ -94,9 +125,14 @@ lists.
 ```
 Phase 1  feat       adaptor accepts both names           (non-breaking)  ✅ merged (#324, 0.6.10)
    |       fleet rolled out to 0.6.10  ✅
-Phase 2  refactor!  submitter emits new names            (breaking)      <-- this PR (0.7.0)
+Phase 2  refactor!  submitter emits new names            (breaking)      ✅ merged (#338, 0.7.0)
+   |       0.7.0 deployed everywhere (Gamma + Prod)  ✅
+   |       + default CondaPackages pin bump 0.6.* -> 0.7.*  (#343, in review)
    |       all submitters updated
-Phase 3  refactor!  adaptor drops legacy-name support    (breaking)
+Phase 3  refactor!  adaptor drops legacy-name support    (breaking)      ⏸️ ON HOLD
+   |       precondition not met: cannot yet confirm no legacy-name
+   |       submitters/bundles remain in flight; silent-failure risk too
+   |       high to merge speculatively even with 0.7.0 fully deployed
    |
 Phase 4  feat       adopt OpenJD native chunking         (feature)      independent track
 ```
