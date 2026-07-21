@@ -18,9 +18,11 @@ import pytest
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
+import urllib.request
 import yaml
 from scripts.build_plugin import find_engine_root
 
@@ -1870,9 +1872,147 @@ def stop_queue_fleet_associations_and_wait(
         raise
 
 
+def _get_ec2_instance_id(timeout_seconds: float = 1.0) -> Optional[str]:
+    """
+    Query IMDSv2 for this host's EC2 instance ID.
+
+    Returns:
+        The instance ID, or None if the host is not an EC2 instance or IMDS
+        is unreachable
+    """
+    try:
+        token_request = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "30"},
+        )
+        with urllib.request.urlopen(token_request, timeout=timeout_seconds) as response:
+            token = response.read().decode()
+        instance_id_request = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/instance-id",
+            headers={"X-aws-ec2-metadata-token": token},
+        )
+        with urllib.request.urlopen(instance_id_request, timeout=timeout_seconds) as response:
+            return response.read().decode()
+    except Exception:
+        return None
+
+
+def _list_fleet_workers(
+    deadline_client: BaseClient, farm_id: str, fleet_id: str
+) -> List[Dict[str, Any]]:
+    """Return all workers in the given fleet."""
+    workers: List[Dict[str, Any]] = []
+    next_token: Optional[str] = None
+    while True:
+        kwargs: Dict[str, Any] = {"farmId": farm_id, "fleetId": fleet_id}
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = deadline_client.list_workers(**kwargs)
+        workers.extend(response.get("workers", []))
+        next_token = response.get("nextToken")
+        if not next_token:
+            return workers
+
+
+def _find_fleet_worker_for_this_host(
+    workers: List[Dict[str, Any]], instance_id: Optional[str]
+) -> Optional[str]:
+    """
+    Find the worker registered in the fleet for this host.
+
+    Matches by EC2 instance ARN when both the local instance ID and the
+    worker's reported instance ARN are available, otherwise falls back to
+    matching the hostname. If several workers match, the most recently
+    created one is returned.
+
+    Args:
+        workers: Workers in the fleet as returned by ListWorkers
+        instance_id: This host's EC2 instance ID, if known
+
+    Returns:
+        The matching workerId, or None if no worker is registered for this host
+    """
+    host_name = socket.gethostname().lower()
+    matches: List[Dict[str, Any]] = []
+    for worker in workers:
+        host_properties = worker.get("hostProperties", {})
+        ec2_instance_arn = host_properties.get("ec2InstanceArn", "")
+        if instance_id and ec2_instance_arn:
+            if ec2_instance_arn.endswith(f"/{instance_id}"):
+                return worker["workerId"]
+            continue
+        if host_properties.get("hostName", "").lower() == host_name:
+            matches.append(worker)
+
+    if not matches:
+        return None
+    matches.sort(key=lambda w: w.get("createdAt") or "", reverse=True)
+    return matches[0]["workerId"]
+
+
+def reconcile_worker_agent_state(
+    deadline_client: BaseClient, farm_id: str, fleet_id: str, persistence_dir: str
+) -> None:
+    """
+    Reconcile the worker agent's persisted state (worker.json) with the fleet
+    before the agent starts, so the agent only calls CreateWorker when no
+    worker is registered for this host.
+
+    Without this, a locally cached worker ID that was deleted service-side
+    makes the agent discard its state and call CreateWorker, which fails with
+    a ConflictException ('A worker has already been created for this EC2
+    instance') if the service still has a worker bound to this instance. This
+    mirrors how a long-lived customer-managed fleet host is expected to reuse
+    its worker identity instead of deleting and recreating it on every run.
+
+    Resolution order:
+    1. The cached worker ID still exists in the fleet -> keep the state file
+    2. The fleet has a worker registered for this host -> write its ID into
+       the state file so the agent adopts it
+    3. No worker exists for this host -> remove the state file so the agent
+       creates a new worker
+    """
+    state_file = os.path.join(persistence_dir, "worker.json")
+
+    cached_worker_id: Optional[str] = None
+    if os.path.isfile(state_file):
+        try:
+            with open(state_file, encoding="utf8") as f:
+                cached_worker_id = json.load(f).get("worker_id")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read worker state file {state_file}: {e}")
+
+    workers = _list_fleet_workers(deadline_client, farm_id, fleet_id)
+    fleet_worker_ids = {worker["workerId"] for worker in workers}
+
+    if cached_worker_id and cached_worker_id in fleet_worker_ids:
+        logger.info(f"Cached worker {cached_worker_id} still exists in fleet, reusing it")
+        return
+
+    if cached_worker_id:
+        logger.info(f"Cached worker {cached_worker_id} no longer exists in fleet")
+
+    instance_id = _get_ec2_instance_id()
+    host_worker_id = _find_fleet_worker_for_this_host(workers, instance_id)
+
+    if host_worker_id:
+        state: Dict[str, Any] = {"worker_id": host_worker_id}
+        if instance_id:
+            state["instance_id"] = instance_id
+        with open(state_file, "w", encoding="utf8") as f:
+            json.dump(state, f)
+        logger.info(f"Adopted worker {host_worker_id} registered for this host into {state_file}")
+    else:
+        if os.path.isfile(state_file):
+            os.remove(state_file)
+            logger.info(f"Removed stale worker state file {state_file}")
+        logger.info("No worker registered for this host; the agent will create a new one")
+
+
 @pytest.fixture(scope="session")
 def deadline_worker_agent(
-    request, reusable_farm_id: str, reusable_fleet_id: str
+    request, deadline_client: BaseClient, reusable_farm_id: str, reusable_fleet_id: str
 ) -> Generator[Tuple[subprocess.Popen, str], None, None]:
     """
     Launch deadline-worker-agent as a subprocess using the farm ID and fleet ID from our tests.
@@ -1881,6 +2021,7 @@ def deadline_worker_agent(
 
     Args:
         request: The pytest request object (used to read the --ueversion option)
+        deadline_client: Boto3 Deadline client used to reconcile worker state
         reusable_farm_id: The farm ID to use
         reusable_fleet_id: The fleet ID to use
 
@@ -1939,6 +2080,20 @@ def deadline_worker_agent(
     # Create persistence dir for worker agent state
     persistence_dir = os.path.join(os.getcwd(), "worker-agent-state")
     os.makedirs(persistence_dir, exist_ok=True)
+
+    # Make sure the persisted worker identity matches the fleet so the agent
+    # reuses this host's registered worker instead of failing on CreateWorker
+    # with 'A worker has already been created for this EC2 instance'.
+    try:
+        reconcile_worker_agent_state(
+            deadline_client=deadline_client,
+            farm_id=reusable_farm_id,
+            fleet_id=reusable_fleet_id,
+            persistence_dir=persistence_dir,
+        )
+    except Exception as e:
+        # Reconciliation is best-effort; fall back to the agent's own bootstrap
+        logger.warning(f"Failed to reconcile worker agent state: {e}")
 
     # Start the worker agent process
     cmd = [
