@@ -1,5 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
+import os
+
 import unreal
 from typing import Optional, Callable
 from dataclasses import dataclass, asdict
@@ -60,6 +62,62 @@ class DependencyCollector:
         self._all_dependencies = list()
         self._missing_dependencies = list()
         self._already_synced = list()
+
+    @staticmethod
+    def _get_mrq_job_ocio_configuration_source(mrq_job):
+        """Return the enabled OCIO configuration asset referenced by an MRQ job."""
+        try:
+            color_setting_class = unreal.MoviePipelineColorSetting
+        except AttributeError:
+            return None
+
+        color_setting = mrq_job.get_configuration().find_setting_by_class(color_setting_class)
+        if not color_setting:
+            return None
+
+        display_configuration = color_setting.ocio_configuration
+        if not display_configuration or not display_configuration.is_enabled:
+            return None
+
+        return display_configuration.color_configuration.configuration_source
+
+    @classmethod
+    def get_mrq_job_dependency_roots(cls, mrq_job) -> list[str]:
+        """Return assets whose dependencies are required to reconstruct an MRQ job."""
+        # Strip the object suffix from soft object paths ("/Game/Path/Asset.Asset"
+        # -> "/Game/Path/Asset"). os.path.splitext splits at the LAST dot, so
+        # directory names containing dots (e.g. "/Game/Ver1.2/Seq") stay intact.
+        level_sequence_path = os.path.splitext(common.soft_obj_path_to_str(mrq_job.sequence))[0]
+        level_path = os.path.splitext(common.soft_obj_path_to_str(mrq_job.map))[0]
+        dependency_roots = [level_sequence_path, level_path]
+
+        ocio_configuration_source = cls._get_mrq_job_ocio_configuration_source(mrq_job)
+        if ocio_configuration_source:
+            ocio_asset_path = os.path.splitext(str(ocio_configuration_source.get_path_name()))[0]
+            if DependencyFilters.dependency_in_game_folder(ocio_asset_path):
+                dependency_roots.append(ocio_asset_path)
+            else:
+                logger.info(
+                    "OCIO configuration asset %s is outside /Game/ and is skipped from "
+                    "dependency collection; only its external configuration file (if any) "
+                    "will be attached.",
+                    ocio_asset_path,
+                )
+
+        return dependency_roots
+
+    @classmethod
+    def get_mrq_job_ocio_config_file_path(cls, mrq_job) -> Optional[str]:
+        """Return the OS path to the external config used by an enabled MRQ OCIO setting."""
+        ocio_configuration_source = cls._get_mrq_job_ocio_configuration_source(mrq_job)
+        if not ocio_configuration_source:
+            return None
+
+        configuration_file = str(ocio_configuration_source.configuration_file.file_path)
+        if not configuration_file or configuration_file.startswith("ocio://"):
+            return None
+
+        return common.os_abs_from_relative(configuration_file).replace("\\", "/")
 
     def collect(
         self,

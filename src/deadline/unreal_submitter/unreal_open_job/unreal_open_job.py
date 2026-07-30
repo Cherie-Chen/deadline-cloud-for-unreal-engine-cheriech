@@ -1463,9 +1463,7 @@ class RenderUnrealOpenJob(UnrealOpenJob):
 
     def _collect_mrq_job_dependencies(self) -> list[str]:
         """
-        Collects the dependencies of the Level and LevelSequence that used in MRQ Job.
-
-        Use :class:`deadline.unreal_submitter.unreal_dependency_collector.collector.DependencyCollector` for collecting
+        Collect dependencies required by the Level, LevelSequence, and MRQ configuration.
 
         :return: List of the dependencies
         :rtype: list[str]
@@ -1473,26 +1471,15 @@ class RenderUnrealOpenJob(UnrealOpenJob):
         if not self._mrq_job:
             raise exceptions.MrqJobIsMissingError("MRQ Job must be provided")
 
-        level_sequence_path = common.soft_obj_path_to_str(self._mrq_job.sequence)
-        level_sequence_path = os.path.splitext(level_sequence_path)[0]
+        dependency_roots = self._dependency_collector.get_mrq_job_dependency_roots(self._mrq_job)
+        all_dependencies = []
+        for dependency_root in dependency_roots:
+            all_dependencies += self._dependency_collector.collect(
+                dependency_root,
+                filter_method=DependencyFilters.dependency_in_game_folder,
+            )
 
-        level_path = common.soft_obj_path_to_str(self._mrq_job.map)
-        level_path = os.path.splitext(level_path)[0]
-
-        level_sequence_dependencies = self._dependency_collector.collect(
-            level_sequence_path, filter_method=DependencyFilters.dependency_in_game_folder
-        )
-
-        level_dependencies = self._dependency_collector.collect(
-            level_path, filter_method=DependencyFilters.dependency_in_game_folder
-        )
-
-        all_dependencies = (
-            level_sequence_dependencies + level_dependencies + [level_sequence_path, level_path]
-        )
-        unique_dependencies = list(set(all_dependencies))
-
-        return unique_dependencies
+        return list(set(all_dependencies + dependency_roots))
 
     def _get_mrq_job_dependency_paths(self):
         """
@@ -1647,8 +1634,20 @@ class RenderUnrealOpenJob(UnrealOpenJob):
             if plugins:
                 asset_references.input_directories.update(plugins.input_directories)
 
-        # add attachments from preset overrides
+        # add attachments from preset overrides and MRQ-only external resources
         if self.mrq_job:
+            ocio_config_file = self._dependency_collector.get_mrq_job_ocio_config_file_path(
+                self.mrq_job
+            )
+            if ocio_config_file:
+                if os.path.exists(ocio_config_file):
+                    asset_references.input_filenames.add(ocio_config_file)
+                else:
+                    logger.warning(
+                        "The OCIO configuration file referenced by the MRQ job does not exist: %s",
+                        ocio_config_file,
+                    )
+
             # input files
             asset_references.input_filenames.update(self._get_mrq_job_attachments_input_files())
 

@@ -25,32 +25,18 @@ logger = get_logger()
 class DeadlineCloudJobBundleLibraryImplementation(unreal.DeadlineCloudJobBundleLibrary):
     @unreal.ufunction(override=True)
     def get_job_dependencies(self, mrq_job):
-        level_sequence_path = common.soft_obj_path_to_str(mrq_job.sequence)
-        level_path = common.soft_obj_path_to_str(mrq_job.map)
-
-        level_sequence_path, _ = os.path.splitext(level_sequence_path)
-        level_path, _ = os.path.splitext(level_path)
-
         dependency_collector = DependencyCollector()
-        logger.info("Level sequence: " + level_sequence_path)
-        logger.info("Level: " + level_path)
+        dependency_roots = dependency_collector.get_mrq_job_dependency_roots(mrq_job)
+        unreal_dependencies = []
 
-        unreal_dependencies = dependency_collector.collect(
-            asset_path=level_sequence_path,
-            filter_method=DependencyFilters.dependency_in_game_folder,
-        )
+        for dependency_root in dependency_roots:
+            logger.info("Dependency root: " + dependency_root)
+            unreal_dependencies += dependency_collector.collect(
+                asset_path=dependency_root,
+                filter_method=DependencyFilters.dependency_in_game_folder,
+            )
 
-        unreal_dependencies += dependency_collector.collect(
-            asset_path=level_path, filter_method=DependencyFilters.dependency_in_game_folder
-        )
-
-        unreal_dependencies += [level_sequence_path, level_path]
-
-        logger.info(
-            f"Converted level path: "
-            f"{common.os_path_from_unreal_path(level_sequence_path, with_ext=True)}"
-        )
-
+        unreal_dependencies += dependency_roots
         unreal_dependencies = list(set(unreal_dependencies))
 
         return [common.os_path_from_unreal_path(d, with_ext=True) for d in unreal_dependencies]
